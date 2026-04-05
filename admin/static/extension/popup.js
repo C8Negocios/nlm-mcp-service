@@ -128,5 +128,5 @@ async function doAuth() {
   }
 }
 
-// Expose globally for onclick
-window.doAuth = doAuth;
+// Attach event listener (MV3 CSP forbids inline onclick)
+document.getElementById("authBtn").addEventListener("click", doAuth);
