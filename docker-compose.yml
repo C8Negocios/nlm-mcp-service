@@ -1,0 +1,28 @@
+services:
+  nlm-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nlm-service
+    restart: unless-stopped
+    environment:
+      - NOTEBOOKLM_MCP_TRANSPORT=http
+      - NOTEBOOKLM_MCP_PORT=8080
+      - ADMIN_SECRET=${ADMIN_SECRET:-c8club-nlm-admin}
+      - NOTEBOOKLM_HL=pt
+    volumes:
+      # Cookies e config persistem entre deploys e restarts
+      - nlm_data:/root/.notebooklm-mcp-cli
+    # IMPORTANTE: Não expor porta 8080 publicamente — apenas rede interna
+    # Coolify/Traefik irá expor o Admin UI (porta 3000) com HTTPS
+    networks:
+      - coolify   # Rede global Coolify — acessível por todos os projetos
+      - default   # Rede isolada do resource
+
+volumes:
+  nlm_data:
+    driver: local
+
+networks:
+  coolify:
+    external: true  # Rede predefinida do Coolify — cross-project communication

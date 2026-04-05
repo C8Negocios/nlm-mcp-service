@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NLM Auth Manager — C8Club</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #050c1a;
+      --surface:   rgba(255,255,255,0.04);
+      --border:    rgba(255,255,255,0.08);
+      --accent:    #00d4ff;
+      --accent2:   #7c3aed;
+      --success:   #10b981;
+      --warning:   #f59e0b;
+      --danger:    #ef4444;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --radius:    16px;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow-x: hidden;
+    }
+
+    /* Animated background */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: -1;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 10%, rgba(0,212,255,0.06) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 80%, rgba(124,58,237,0.08) 0%, transparent 60%),
+        var(--bg);
+    }
+
+    /* ── LAYOUT ───────────────────────────────────────────────────────────── */
+    .shell {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+      gap: 24px;
+    }
+
+    /* ── HEADER ───────────────────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .logo {
+      width: 44px; height: 44px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 12px;
+      display: grid; place-items: center;
+      font-size: 22px;
+      box-shadow: 0 0 24px rgba(0,212,255,0.3);
+    }
+    .header-text h1 {
+      font-size: 20px; font-weight: 700; letter-spacing: -0.3px;
+      background: linear-gradient(90deg, var(--accent), #818cf8);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .header-text p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* ── CARD ─────────────────────────────────────────────────────────────── */
+    .card {
+      width: 100%; max-width: 520px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      transition: box-shadow 0.3s;
+    }
+    .card:hover { box-shadow: 0 0 40px rgba(0,212,255,0.05); }
+
+    /* ── STATUS BADGE ─────────────────────────────────────────────────────── */
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 28px;
+    }
+    .status-label { font-size: 13px; color: var(--muted); font-weight: 500; letter-spacing: 0.5px; text-transform: uppercase; }
+    .badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px;
+      border-radius: 100px;
+      font-size: 13px; font-weight: 600;
+      transition: all 0.4s ease;
+    }
+    .badge.authenticated { background: rgba(16,185,129,0.15); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
+    .badge.authenticating { background: rgba(245,158,11,0.15); color: var(--warning); border: 1px solid rgba(245,158,11,0.3); }
+    .badge.idle, .badge.failed { background: rgba(239,68,68,0.10); color: var(--danger); border: 1px solid rgba(239,68,68,0.2); }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .badge.authenticated .dot { animation: pulse-green 2s infinite; }
+    .badge.authenticating .dot { animation: pulse-yellow 1s infinite; }
+
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.5); }
+      50%       { box-shadow: 0 0 0 6px rgba(16,185,129,0); }
+    }
+    @keyframes pulse-yellow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.5); }
+      50%       { box-shadow: 0 0 0 6px rgba(245,158,11,0); }
+    }
+
+    /* ── ACCOUNT ──────────────────────────────────────────────────────────── */
+    .account-info {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: rgba(16,185,129,0.07);
+      border: 1px solid rgba(16,185,129,0.15);
+      border-radius: 10px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      color: var(--success);
+    }
+    .account-info.show { display: flex; }
+
+    /* ── INSTRUCTIONS ─────────────────────────────────────────────────────── */
+    .steps {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .step-num {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      display: grid; place-items: center;
+      font-size: 11px; font-weight: 700; color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    /* ── BUTTON ───────────────────────────────────────────────────────────── */
+    .btn {
+      width: 100%;
+      padding: 14px 24px;
+      border: none;
+      border-radius: 12px;
+      font-family: 'Inter', sans-serif;
+      font-size: 15px; font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      position: relative; overflow: hidden;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #7c3aed);
+      color: white;
+      box-shadow: 0 4px 24px rgba(0,212,255,0.25);
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 32px rgba(0,212,255,0.35); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn-danger { background: rgba(239,68,68,0.15); color: var(--danger); border: 1px solid rgba(239,68,68,0.25); margin-top: 10px; }
+    .btn-danger:hover { background: rgba(239,68,68,0.25); }
+
+    /* ── SECRET INPUT ─────────────────────────────────────────────────────── */
+    .secret-field {
+      width: 100%;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      margin-bottom: 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .secret-field:focus { border-color: rgba(0,212,255,0.4); }
+    .secret-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: block; letter-spacing: 0.5px; text-transform: uppercase; }
+
+    /* ── VNC BROWSER PANEL ────────────────────────────────────────────────── */
+    .browser-panel {
+      width: 100%; max-width: 960px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .browser-panel.show { display: flex; }
+    .browser-header {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px 12px 0 0;
+      padding: 10px 16px;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 13px; color: var(--muted);
+      backdrop-filter: blur(20px);
+    }
+    .browser-header .dot-red   { width:12px;height:12px;border-radius:50%;background:#ff5f57; }
+    .browser-header .dot-yel   { width:12px;height:12px;border-radius:50%;background:#ffbd2e; }
+    .browser-header .dot-grn   { width:12px;height:12px;border-radius:50%;background:#28c940; }
+    .browser-bar {
+      flex: 1; background: rgba(255,255,255,0.06);
+      border-radius: 6px; padding: 4px 10px; font-size: 12px; color: var(--muted);
+    }
+    .vnc-frame {
+      width: 100%; height: 600px;
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 12px 12px;
+      background: #111;
+    }
+
+    /* ── LOADING ──────────────────────────────────────────────────────────── */
+    .loading-bar {
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      border-radius: 2px;
+      animation: loading 1.5s ease-in-out infinite;
+      display: none;
+    }
+    .loading-bar.show { display: block; }
+    @keyframes loading {
+      0%   { transform: scaleX(0); transform-origin: left; }
+      50%  { transform: scaleX(1); transform-origin: left; }
+      51%  { transform: scaleX(1); transform-origin: right; }
+      100% { transform: scaleX(0); transform-origin: right; }
+    }
+
+    .msg {
+      text-align: center; font-size: 13px; color: var(--muted);
+      padding: 8px;
+    }
+
+    /* ── MCP INFO ─────────────────────────────────────────────────────────── */
+    .mcp-info {
+      width: 100%; max-width: 520px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+    }
+    .mcp-info h3 { font-size: 13px; color: var(--muted); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 8px; }
+    .mcp-url {
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(0,212,255,0.15);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-family: monospace; font-size: 13px; color: var(--accent);
+      word-break: break-all;
+    }
+    .mcp-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  </style>
+</head>
+
+<body>
+<div class="shell">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">📓</div>
+    <div class="header-text">
+      <h1>NLM Auth Manager</h1>
+      <p>C8Club · Infraestrutura de Plataforma</p>
+    </div>
+  </div>
+
+  <!-- Auth Card -->
+  <div class="card" id="authCard">
+
+    <!-- Status -->
+    <div class="status-row">
+      <span class="status-label">Status do Sistema</span>
+      <div class="badge idle" id="statusBadge">
+        <span class="dot"></span>
+        <span id="statusText">Verificando...</span>
+      </div>
+    </div>
+
+    <!-- Account Info (shown when authenticated) -->
+    <div class="account-info" id="accountInfo">
+      ✅ <strong id="accountEmail"></strong>
+    </div>
+
+    <!-- Loading bar -->
+    <div class="loading-bar" id="loadingBar"></div>
+
+    <!-- Instructions -->
+    <div class="steps" id="steps">
+      <div class="step"><div class="step-num">1</div>Clique no botão abaixo para abrir o browser de autenticação</div>
+      <div class="step"><div class="step-num">2</div>Faça login com a conta Google do C8Club no browser que vai aparecer</div>
+      <div class="step"><div class="step-num">3</div>O sistema detecta automaticamente e salva — sem mais nada</div>
+    </div>
+
+    <!-- Secret (first time only) -->
+    <div id="secretSection">
+      <label class="secret-label" for="secretInput">Chave de Acesso</label>
+      <input
+        type="password"
+        id="secretInput"
+        class="secret-field"
+        placeholder="Digite a chave de acesso"
+        autocomplete="current-password"
+      />
+    </div>
+
+    <!-- Auth Button -->
+    <button class="btn btn-primary" id="authBtn" onclick="startAuth()">
+      <span>🔑</span>
+      <span id="btnText">Entrar com Google</span>
+    </button>
+
+    <!-- Cancel (shown during auth) -->
+    <button class="btn btn-danger" id="cancelBtn" style="display:none" onclick="cancelAuth()">
+      ✕ Cancelar
+    </button>
+
+    <div class="msg" id="statusMsg"></div>
+  </div>
+
+  <!-- Browser Panel (VNC) -->
+  <div class="browser-panel" id="browserPanel">
+    <div class="browser-header">
+      <span class="dot-red"></span>
+      <span class="dot-yel"></span>
+      <span class="dot-grn"></span>
+      <div class="browser-bar">🔒 notebooklm.google.com</div>
+      <span style="font-size:12px">Faça login com sua conta Google →</span>
+    </div>
+    <iframe
+      id="vncFrame"
+      class="vnc-frame"
+      src="/novnc/vnc_lite.html?path=ws-vnc&autoconnect=true&resize=scale&show_dot=false&reconnect=true"
+      title="Browser de Autenticação"
+      allow="clipboard-read; clipboard-write"
+    ></iframe>
+  </div>
+
+  <!-- MCP Info -->
+  <div class="mcp-info">
+    <h3>Endpoint MCP (uso interno)</h3>
+    <div class="mcp-url">http://nlm-service:8080</div>
+    <p class="mcp-note">Acessível apenas via rede Docker do Coolify — não exposto à internet.</p>
+  </div>
+
+</div>
+
+<script>
+  const BASE = '';
+  let pollInterval = null;
+  let currentStatus = 'unknown';
+
+  // ── Secret management ──────────────────────────────────────────────────────
+  function getSecret() {
+    return document.getElementById('secretInput').value
+        || sessionStorage.getItem('nlm_secret')
+        || '';
+  }
+
+  function saveSecret(s) {
+    sessionStorage.setItem('nlm_secret', s);
+  }
+
+  // Restore secret from session
+  const stored = sessionStorage.getItem('nlm_secret');
+  if (stored) {
+    document.getElementById('secretInput').value = stored;
+    document.getElementById('secretSection').style.display = 'none';
+  }
+
+  // ── Status polling ─────────────────────────────────────────────────────────
+  async function fetchStatus() {
+    try {
+      const r = await fetch(`${BASE}/api/status`);
+      const d = await r.json();
+      updateUI(d.status, d.account);
+    } catch (e) {
+      updateUI('error', null);
+    }
+  }
+
+  function updateUI(status, account) {
+    if (status === currentStatus) return;
+    currentStatus = status;
+
+    const badge    = document.getElementById('statusBadge');
+    const text     = document.getElementById('statusText');
+    const btn      = document.getElementById('authBtn');
+    const btnTxt   = document.getElementById('btnText');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const panel    = document.getElementById('browserPanel');
+    const msg      = document.getElementById('statusMsg');
+    const loading  = document.getElementById('loadingBar');
+    const acctInfo = document.getElementById('accountInfo');
+    const acctEmail = document.getElementById('accountEmail');
+
+    badge.className = `badge ${status}`;
+
+    switch (status) {
+      case 'authenticated':
+        text.textContent = 'Sistema Online ✓';
+        btn.disabled = false;
+        btnTxt.textContent = 'Atualizar Autenticação';
+        cancelBtn.style.display = 'none';
+        panel.classList.remove('show');
+        loading.classList.remove('show');
+        msg.textContent = '';
+        if (account) {
+          acctEmail.textContent = account;
+          acctInfo.classList.add('show');
+        }
+        stopPolling();
+        break;
+
+      case 'authenticating':
+        text.textContent = 'Aguardando Login...';
+        btn.disabled = true;
+        btnTxt.textContent = 'Aguardando login...';
+        cancelBtn.style.display = 'flex';
+        panel.classList.add('show');
+        loading.classList.add('show');
+        msg.textContent = 'Faça login no browser acima. O sistema salvará automaticamente.';
+        acctInfo.classList.remove('show');
+        break;
+
+      case 'failed':
+        text.textContent = 'Falha na Autenticação';
+        btn.disabled = false;
+        btnTxt.textContent = 'Tentar Novamente';
+        cancelBtn.style.display = 'none';
+        panel.classList.remove('show');
+        loading.classList.remove('show');
+        msg.textContent = '⚠️ Falha. Tente novamente.';
+        acctInfo.classList.remove('show');
+        stopPolling();
+        break;
+
+      default: // idle / error
+        text.textContent = 'Não Autenticado';
+        btn.disabled = false;
+        btnTxt.textContent = 'Entrar com Google';
+        cancelBtn.style.display = 'none';
+        panel.classList.remove('show');
+        loading.classList.remove('show');
+        acctInfo.classList.remove('show');
+    }
+  }
+
+  function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(fetchStatus, 2000);
+  }
+
+  function stopPolling() {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+
+  // ── Actions ────────────────────────────────────────────────────────────────
+  async function startAuth() {
+    const secret = getSecret();
+    if (!secret) {
+      document.getElementById('secretSection').style.display = 'block';
+      document.getElementById('secretInput').focus();
+      document.getElementById('statusMsg').textContent = '⚠️ Insira a chave de acesso primeiro.';
+      return;
+    }
+
+    saveSecret(secret);
+    document.getElementById('secretSection').style.display = 'none';
+
+    document.getElementById('authBtn').disabled = true;
+    document.getElementById('btnText').textContent = 'Iniciando browser...';
+    document.getElementById('loadingBar').classList.add('show');
+
+    try {
+      const r = await fetch(`${BASE}/api/start-auth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret }),
+      });
+
+      if (r.status === 401) {
+        sessionStorage.removeItem('nlm_secret');
+        document.getElementById('secretSection').style.display = 'block';
+        document.getElementById('secretInput').value = '';
+        document.getElementById('secretInput').focus();
+        document.getElementById('statusMsg').textContent = '⚠️ Chave incorreta.';
+        document.getElementById('authBtn').disabled = false;
+        document.getElementById('btnText').textContent = 'Entrar com Google';
+        document.getElementById('loadingBar').classList.remove('show');
+        return;
+      }
+
+      currentStatus = 'unknown'; // Force UI update
+      updateUI('authenticating', null);
+      startPolling();
+    } catch (e) {
+      document.getElementById('statusMsg').textContent = '⚠️ Erro de conexão.';
+      document.getElementById('authBtn').disabled = false;
+      document.getElementById('btnText').textContent = 'Entrar com Google';
+      document.getElementById('loadingBar').classList.remove('show');
+    }
+  }
+
+  async function cancelAuth() {
+    const secret = getSecret();
+    await fetch(`${BASE}/api/cancel-auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+    currentStatus = 'unknown';
+    updateUI('idle', null);
+    stopPolling();
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  fetchStatus();
+</script>
+</body>
+</html>
