@@ -8,10 +8,12 @@ Operator clicks once — everything else is automatic.
 """
 
 import io
+import json
 import os
 import subprocess
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -43,26 +45,44 @@ def _verify(secret: str):
         raise HTTPException(status_code=401, detail="Acesso nao autorizado")
 
 
-def _nlm_login_manual() -> tuple[bool, str]:
+def _write_nlm_profile(cookie_dict: dict) -> tuple[bool, str]:
     """
-    Runs: nlm login --manual --file <cookies.txt>
-    This is the officially supported way to import cookies without a browser.
-    Creates an authenticated profile that persists across container restarts.
+    Writes cookies directly to the nlm profile JSON files:
+      ~/.notebooklm-mcp-cli/profiles/default/cookies.json  (dict name->value)
+      ~/.notebooklm-mcp-cli/profiles/default/metadata.json
+    This bypasses 'nlm login' entirely — no subprocess, no browser, no Netscape.
+    The nlm MCP server reads this profile on every request.
     """
     try:
-        result = subprocess.run(
-            ["nlm", "login", "--manual", "--file", str(COOKIES_FILE)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        output = result.stdout + result.stderr
-        if result.returncode == 0:
-            return True, output.strip()[-200:]
-        else:
-            return False, output.strip()[-200:]
-    except Exception as e:
-        return False, str(e)
+        from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
+        profile_dir = get_profile_dir("default")
+    except Exception:
+        # Fallback path if import fails
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.chmod(0o700)
+
+    cookies_file = profile_dir / "cookies.json"
+    metadata_file = profile_dir / "metadata.json"
+
+    cookies_file.write_text(
+        json.dumps(cookie_dict, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    cookies_file.chmod(0o600)
+
+    metadata_file.write_text(
+        json.dumps({
+            "last_validated": datetime.now().isoformat(),
+            "email": None,
+            "csrf_token": None,
+            "session_id": None,
+        }, indent=2),
+        encoding="utf-8"
+    )
+    metadata_file.chmod(0o600)
+
+    return True, str(cookies_file)
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -141,15 +161,16 @@ async def auth_bookmarklet(body: dict):
                     count += 1
 
         cookie_header = "; ".join(cookie_pairs)
+        cookie_dict   = dict(pair.split("=", 1) for pair in cookie_pairs if "=" in pair)
 
-        # Write Netscape cookies.txt
+        # Write Netscape cookies.txt (legacy compat)
         COOKIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
         # Write cookie_env.txt (read by start.sh on next boot)
         COOKIE_ENV.write_text(cookie_header, encoding="utf-8")
 
-        # Run: nlm login --manual --file cookies.txt (no browser needed)
-        ok, info = _nlm_login_manual()
+        # Write directly to nlm profile JSON (what nlm actually reads)
+        ok, info = _write_nlm_profile(cookie_dict)
 
         _auth["status"]       = "authenticated"
         _auth["cookie_count"] = count
