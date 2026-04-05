@@ -4,6 +4,11 @@ Auth flow: operator opens UI → clicks "Iniciar Login" → sees Chrome via noVN
            logs into notebooklm.google.com from the SERVER's browser →
            clicks "Confirmar Login" → nlm captures server-side session → done.
 Auto-refresh via headless Chrome for 2-4 weeks.
+
+MCP Proxy Layer:
+  POST /api/source-add   → adiciona source de texto num notebook via MCP
+  GET  /api/notebooks    → lista notebooks disponíveis via MCP
+  GET  /api/mcp-status   → verifica se MCP está acessível
 """
 
 import asyncio
@@ -15,6 +20,8 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
+
+import httpx
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 import websockets
@@ -48,8 +55,13 @@ def _verify(secret: str):
         raise HTTPException(status_code=401, detail="Acesso nao autorizado")
 
 
-def _write_nlm_profile(cookie_dict: dict) -> tuple[bool, str]:
-    """Write cookies directly to nlm's profile JSON — no subprocess needed."""
+def _write_nlm_profile(cookie_objects: list, email: str | None = None) -> tuple[bool, str]:
+    """
+    Write cookies to nlm profile in the Playwright LIST format that
+    notebooklm-mcp-cli expects. The format is:
+      [{"name": ..., "value": ..., "domain": ..., "path": ...,
+        "expires": ..., "httpOnly": ..., "secure": ..., "sameSite": "None"}]
+    """
     try:
         try:
             from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
@@ -60,15 +72,36 @@ def _write_nlm_profile(cookie_dict: dict) -> tuple[bool, str]:
         profile_dir.mkdir(parents=True, exist_ok=True)
         profile_dir.chmod(0o700)
 
+        expiry_far = int(time.time()) + (86400 * 365)
+
+        # Build Playwright-format cookie list
+        playwright_cookies = []
+        for c in cookie_objects:
+            if not isinstance(c, dict) or not c.get("name"):
+                continue
+            playwright_cookies.append({
+                "name":     c.get("name", ""),
+                "value":    c.get("value", ""),
+                "domain":   c.get("domain", ".google.com"),
+                "path":     c.get("path", "/"),
+                "expires":  float(c.get("expirationDate", expiry_far)),
+                "httpOnly": bool(c.get("httpOnly", False)),
+                "secure":   bool(c.get("secure", True)),
+                "sameSite": c.get("sameSite", "None"),
+            })
+
         (profile_dir / "cookies.json").write_text(
-            json.dumps(cookie_dict, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(playwright_cookies, ensure_ascii=False), encoding="utf-8"
         )
         (profile_dir / "cookies.json").chmod(0o600)
 
         (profile_dir / "metadata.json").write_text(
             json.dumps({
                 "last_validated": datetime.now().isoformat(),
-                "email": None, "csrf_token": None, "session_id": None,
+                "email":       email,
+                "csrf_token":  None,
+                "session_id":  None,
+                "build_label": "manual-auth",
             }, indent=2),
             encoding="utf-8"
         )
@@ -76,6 +109,32 @@ def _write_nlm_profile(cookie_dict: dict) -> tuple[bool, str]:
         return True, str(profile_dir / "cookies.json")
     except Exception as e:
         return False, str(e)
+
+
+def _restart_mcp() -> bool:
+    """Kill existing MCP process and restart it so it picks up new cookies."""
+    try:
+        # Kill running MCP instances
+        subprocess.run(["pkill", "-f", "notebooklm-mcp"], capture_output=True)
+        time.sleep(2)
+        # Restart MCP in background
+        proc = subprocess.Popen(
+            ["notebooklm-mcp"],
+            env={**os.environ,
+                 "NOTEBOOKLM_MCP_TRANSPORT": "http",
+                 "NOTEBOOKLM_MCP_PORT": "8080"},
+            stdout=open("/tmp/mcp_restart.log", "w"),
+            stderr=subprocess.STDOUT,
+        )
+        # Reset in-memory MCP session state
+        _mcp_session["id"] = None
+        _mcp_session["initialized"] = False
+        time.sleep(3)
+        logger.info(f"[MCP] Reiniciado (PID {proc.pid})")
+        return True
+    except Exception as e:
+        logger.error(f"[MCP] Falha ao reiniciar: {e}")
+        return False
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -121,6 +180,13 @@ async def run_nlm_login(body: dict):
         return {"message": "Login ja em andamento. Use o browser ao lado para logar.", "running": True}
 
     try:
+        # Remove Chrome SingletonLock que impede Chrome de iniciar
+        nlm_chrome = COOKIES_DIR / "chrome-profiles" / "default"
+        for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+            lock = nlm_chrome / lock_name
+            if lock.exists() or lock.is_symlink():
+                lock.unlink(missing_ok=True)
+
         proc = subprocess.Popen(
             ["nlm", "login"],
             env={**os.environ, "DISPLAY": ":99"},
@@ -224,21 +290,31 @@ async def auth_bookmarklet(body: dict):
                     count += 1
 
         cookie_header = "; ".join(cookie_pairs)
-        cookie_dict   = dict(pair.split("=", 1) for pair in cookie_pairs if "=" in pair)
 
         COOKIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         COOKIE_ENV.write_text(cookie_header, encoding="utf-8")
-        ok, info = _write_nlm_profile(cookie_dict)
+
+        # Grava no formato Playwright LIST que o MCP espera
+        ok, info = _write_nlm_profile(
+            cookie_objects if cookie_objects else [
+                {"name": k, "value": v, "domain": ".google.com", "path": "/", "secure": True}
+                for k, v in (pair.split("=", 1) for pair in cookie_pairs if "=" in pair)
+            ]
+        )
+
+        # Reinicia MCP para carregar os novos cookies
+        mcp_ok = _restart_mcp()
 
         _auth["status"]       = "authenticated"
         _auth["cookie_count"] = count
         _auth["source"]       = source
 
         return {
-            "message": f"OK {count} cookies via extensao. Nota: pode falhar por validacao Google IP.",
+            "message": f"OK {count} cookies via extensao. MCP reiniciado: {mcp_ok}.",
             "count": count,
             "source": source,
-            "nlm_ok": ok
+            "nlm_ok": ok,
+            "mcp_restarted": mcp_ok,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
@@ -265,6 +341,194 @@ async def download_extension():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── MCP Proxy: expõe o MCP interno para outros serviços ───────────────────────
+# O worker do blococomercial chama estes endpoints via HTTPS público.
+# O admin FastAPI, por sua vez, chama o MCP local em 127.0.0.1:8080.
+
+MCP_URL = "http://127.0.0.1:8080/mcp"
+_mcp_session: dict = {"sid": None, "initialized": False}
+
+
+async def _mcp_call(payload: dict, timeout: int = 60) -> dict | None:
+    """Faz uma chamada JSON-RPC ao MCP local e retorna o objeto 'result' ou 'error'."""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if _mcp_session["sid"]:
+        headers["Mcp-Session-Id"] = _mcp_session["sid"]
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(MCP_URL, json=payload, headers=headers)
+
+    # Captura session ID do header
+    new_sid = resp.headers.get("mcp-session-id")
+    if new_sid:
+        _mcp_session["sid"] = new_sid
+
+    # Parseia SSE ou JSON direto
+    body = resp.text
+    for line in body.splitlines():
+        if line.startswith("data:") and "jsonrpc" in line:
+            try:
+                return json.loads(line[5:].strip())
+            except Exception:
+                pass
+    try:
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+async def _mcp_ensure_session():
+    """Inicializa a sessão MCP se ainda não estiver ativa."""
+    if _mcp_session["initialized"]:
+        return
+    data = await _mcp_call({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "nlm-admin", "version": "1.0"},
+        },
+    })
+    if data:
+        _mcp_session["initialized"] = True
+
+
+async def _mcp_tool(name: str, arguments: dict, timeout: int = 90) -> dict:
+    """Chama uma tool MCP e retorna {'ok': bool, 'text': str, 'data': any}."""
+    await _mcp_ensure_session()
+    data = await _mcp_call({
+        "jsonrpc": "2.0", "id": int(time.time() * 1000) % 999999,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }, timeout=timeout)
+
+    if not data:
+        return {"ok": False, "text": "Sem resposta do MCP", "data": None}
+
+    if "error" in data:
+        err = data["error"]
+        return {"ok": False, "text": err.get("message", str(err)), "data": None}
+
+    result = data.get("result", {})
+    content = result.get("content", [])
+    text = content[0].get("text", "") if content else ""
+
+    # Tenta parsear JSON embutido no text
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        pass
+
+    return {"ok": True, "text": text, "data": parsed}
+
+
+@app.get("/api/mcp-status")
+async def mcp_status():
+    """Verifica se o MCP está respondendo (para debug e health check)."""
+    try:
+        await _mcp_ensure_session()
+        result = await _mcp_tool("notebook_list", {"max_results": 1}, timeout=20)
+        return {
+            "mcp_ok": result["ok"],
+            "session_id": _mcp_session["sid"],
+            "initialized": _mcp_session["initialized"],
+            "detail": result["text"][:200] if not result["ok"] else "OK",
+        }
+    except Exception as e:
+        return {"mcp_ok": False, "session_id": None, "initialized": False, "detail": str(e)}
+
+
+@app.get("/api/notebooks")
+async def list_notebooks():
+    """
+    Lista todos os notebooks acessíveis na conta autenticada.
+    Usado pelo painel comercial para selecionar o notebook alvo.
+    """
+    try:
+        result = await _mcp_tool("notebook_list", {"max_results": 100}, timeout=60)
+        if not result["ok"]:
+            # Tenta refresh_auth e retry
+            await _mcp_tool("refresh_auth", {}, timeout=30)
+            _mcp_session["initialized"] = False
+            result = await _mcp_tool("notebook_list", {"max_results": 100}, timeout=60)
+
+        if result["ok"] and result["data"]:
+            return {"ok": True, "notebooks": result["data"].get("notebooks", [])}
+        return {"ok": result["ok"], "notebooks": [], "detail": result["text"][:300]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro MCP: {str(e)}")
+
+
+@app.post("/api/source-add")
+async def source_add(body: dict):
+    """
+    Adiciona um source de texto a um notebook NotebookLM.
+
+    Payload esperado:
+    {
+      "notebook_id": "<UUID do notebook>",
+      "title": "Nome Empresa — Nome Pessoa",
+      "content": "Pergunta: ...\nResposta: ...\n...",
+      "secret": "<ADMIN_SECRET>"     # opcional se em rede interna
+    }
+
+    Retorno:
+    { "ok": true, "source_id": "...", "detail": "..." }
+    """
+    # Validação mínima
+    notebook_id = body.get("notebook_id", "").strip()
+    title = body.get("title", "Lead Sem Título").strip()
+    content = body.get("content", "").strip()
+
+    if not notebook_id:
+        raise HTTPException(status_code=400, detail="notebook_id é obrigatório")
+    if not content:
+        raise HTTPException(status_code=400, detail="content é obrigatório")
+
+    try:
+        result = await _mcp_tool("source_add", {
+            "notebook_id": notebook_id,
+            "source_type": "text",
+            "text": content,
+            "title": title,
+            "wait": True,
+        }, timeout=120)
+
+        if not result["ok"]:
+            # Tenta refresh_auth e retry único
+            await _mcp_tool("refresh_auth", {}, timeout=30)
+            _mcp_session["initialized"] = False
+            result = await _mcp_tool("source_add", {
+                "notebook_id": notebook_id,
+                "source_type": "text",
+                "text": content,
+                "title": title,
+                "wait": True,
+            }, timeout=120)
+
+        source_id = None
+        if result["data"]:
+            source_id = (
+                result["data"].get("source_id")
+                or result["data"].get("id")
+                or result["data"].get("source", {}).get("id")
+            )
+
+        return {
+            "ok": result["ok"],
+            "source_id": source_id,
+            "title": title,
+            "notebook_id": notebook_id,
+            "detail": result["text"][:500] if not result["ok"] else "Source adicionado com sucesso",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao adicionar source: {str(e)}")
 
 
 # ── WebSocket proxy: /ws-vnc → localhost:6081 (websockify/VNC) ─────────────────
