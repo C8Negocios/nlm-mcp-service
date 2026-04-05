@@ -113,11 +113,27 @@ def _run_browser_auth():
             stderr=subprocess.DEVNULL,
         )
         _auth["procs"]["chromium"] = chromium
-        time.sleep(4.0)  # Wait for Chromium to fully start before CDP connect
+        time.sleep(8.0)  # Chromium needs more time in Docker containers
 
-        # 5. nlm login via CDP (connects to our Chromium, monitors for auth)
+        # 5. Wait for Chromium CDP to be actually accessible before calling nlm
+        import urllib.request
+        cdp_ready = False
+        for attempt in range(20):  # up to 20s
+            try:
+                urllib.request.urlopen("http://localhost:9222/json", timeout=1)
+                cdp_ready = True
+                break
+            except Exception:
+                time.sleep(1)
+
+        if not cdp_ready:
+            _auth["status"] = "failed"
+            return
+
+        # 6. nlm login monitors our Chromium via CDP (auto mode with DISPLAY already set)
+        #    Do NOT use --provider openclaw — that starts its own Chromium and conflicts
         nlm = subprocess.Popen(
-            ["nlm", "login", "--provider", "openclaw", "--cdp-url", "http://localhost:9222"],
+            ["nlm", "login"],  # pure auto mode — uses DISPLAY :99 (our Chromium is there)
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
