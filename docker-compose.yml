@@ -13,11 +13,20 @@ services:
     volumes:
       # Cookies e config persistem entre deploys e restarts
       - nlm_data:/root/.notebooklm-mcp-cli
-    # IMPORTANTE: Não expor porta 8080 publicamente — apenas rede interna
-    # Coolify/Traefik irá expor o Admin UI (porta 3000) com HTTPS
+    # Port 3000 = Admin UI → exposto publicamente via Traefik
+    # Port 8080 = MCP server → interno apenas (sem label Traefik)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      # Admin UI — porta 3000
+      - "traefik.http.routers.nlm-admin.rule=Host(`nlm.codigooito.com.br`)"
+      - "traefik.http.routers.nlm-admin.entrypoints=https"
+      - "traefik.http.routers.nlm-admin.tls=true"
+      - "traefik.http.routers.nlm-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.services.nlm-admin.loadbalancer.server.port=3000"
     networks:
       - coolify   # Rede global Coolify — acessível por todos os projetos
-      - default   # Rede isolada do resource
+      - default
 
 volumes:
   nlm_data:
@@ -25,4 +34,5 @@ volumes:
 
 networks:
   coolify:
-    external: true  # Rede predefinida do Coolify — cross-project communication
+    external: true
+
