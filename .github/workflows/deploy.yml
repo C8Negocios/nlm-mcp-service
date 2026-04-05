@@ -1,0 +1,43 @@
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 157.180.122.109
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            set -e
+            DEPLOY_DIR="/opt/nlm-mcp-service"
+
+            # Clone or pull latest code
+            if [ ! -d "$DEPLOY_DIR/.git" ]; then
+              git clone https://github.com/C8Negocios/nlm-mcp-service.git "$DEPLOY_DIR"
+            else
+              cd "$DEPLOY_DIR" && git pull origin main
+            fi
+
+            cd "$DEPLOY_DIR"
+
+            # Write env file from secrets (injected at deploy time)
+            cat > .env << 'ENVEOF'
+            ADMIN_SECRET=${{ secrets.ADMIN_SECRET }}
+            NOTEBOOKLM_MCP_TRANSPORT=http
+            NOTEBOOKLM_MCP_PORT=8080
+            NOTEBOOKLM_HL=pt
+            ENVEOF
+
+            # Rebuild and restart
+            docker compose down --remove-orphans || true
+            docker compose up -d --build
+
+            echo "✅ nlm-mcp-service deployed successfully"
+            docker compose ps
