@@ -1,14 +1,18 @@
 """
 NLM Admin API — FastAPI backend
 Bookmarklet + Chrome Extension auth.
+After receiving cookies, automatically calls save_auth_tokens on the MCP server.
+The operator just clicks one button — zero manual steps.
 """
 
+import asyncio
 import io
 import os
 import time
 import zipfile
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -16,7 +20,6 @@ from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="NLM Auth Manager", docs_url=None, redoc_url=None)
 
-# Allow Chrome extension origin (chrome-extension://*)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,28 +32,72 @@ COOKIES_DIR = Path("/root/.notebooklm-mcp-cli")
 COOKIES_FILE = COOKIES_DIR / "cookies.txt"
 STATIC_DIR = Path(__file__).parent / "static"
 EXTENSION_DIR = STATIC_DIR / "extension"
+MCP_URL = "http://localhost:8080/mcp"
 
 _auth = {"status": "idle", "account": None, "cookie_count": 0, "source": None}
 
 
 def _verify(secret: str):
     if secret != ADMIN_SECRET:
-        raise HTTPException(status_code=401, detail="Acesso não autorizado")
+        raise HTTPException(status_code=401, detail="Acesso nao autorizado")
 
 
-# ── Status — only file-based check, never calls `nlm --check` ─────────────────
+async def _mcp_save_auth(cookie_header: str) -> dict:
+    """
+    Automatically injects cookies into the MCP server via save_auth_tokens.
+    Called right after writing cookies.txt — operator never needs to do this.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Step 1: Initialize MCP session
+            init_resp = await client.post(
+                MCP_URL,
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "nlm-admin", "version": "1.0"}
+                    }
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream"
+                }
+            )
+            session_id = init_resp.headers.get("mcp-session-id")
+            if not session_id:
+                return {"ok": False, "detail": "No MCP session ID"}
+
+            # Step 2: Call save_auth_tokens with the cookie string
+            save_resp = await client.post(
+                MCP_URL,
+                json={
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {
+                        "name": "save_auth_tokens",
+                        "arguments": {"cookies": cookie_header}
+                    }
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "Mcp-Session-Id": session_id
+                }
+            )
+            body = save_resp.text
+            return {"ok": True, "detail": body[-300:]}
+
+    except Exception as e:
+        return {"ok": False, "detail": str(e)}
+
+
+# ── Status ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/status")
 async def get_status():
-    """
-    IMPORTANT: We do NOT call `nlm login --check` here because it can
-    delete/invalidate the cookie file when cookies are insufficient.
-    Status is based purely on file existence + our in-memory state.
-    """
     if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 50:
         _auth["status"] = "authenticated"
-    # If file doesn't exist but memory says authenticated → keep it
-    # (file might be on volume and status is fresh from this session)
     return {
         "status": _auth["status"],
         "account": _auth["account"],
@@ -59,14 +106,15 @@ async def get_status():
     }
 
 
-# ── Auth endpoint — receives cookies from extension OR bookmarklet ─────────────
+# ── Auth — receives cookies, saves file, auto-calls MCP save_auth_tokens ───────
 
 @app.post("/api/auth-bookmarklet")
 async def auth_bookmarklet(body: dict):
     """
-    Receives cookies from:
-    - Chrome Extension: full objects via chrome.cookies.getAll() — INCLUDES HttpOnly ✅
-    - Bookmarklet fallback: document.cookie string — NO HttpOnly ⚠️
+    1. Receives cookies from Chrome Extension (includes HttpOnly via chrome.cookies.getAll)
+    2. Writes cookies.txt in Netscape format
+    3. AUTO-CALLS save_auth_tokens on MCP server so nlm authenticates immediately
+    Operator only needs to click one button. Nothing else.
     """
     _verify(body.get("secret", ""))
 
@@ -74,7 +122,6 @@ async def auth_bookmarklet(body: dict):
     cookie_objects = body.get("cookies", [])
     cookie_string = body.get("cookies_string", "")
 
-    # Normalize: if cookies field is a string, treat as cookie_string
     if isinstance(cookie_objects, str):
         cookie_string = cookie_objects
         cookie_objects = []
@@ -91,9 +138,9 @@ async def auth_bookmarklet(body: dict):
         ]
         expiry_far = int(time.time()) + (86400 * 365)
         count = 0
+        cookie_pairs = []  # for MCP cookie_header
 
         if cookie_objects and isinstance(cookie_objects, list):
-            # Chrome Extension path — full objects including HttpOnly cookies
             for c in cookie_objects:
                 if not isinstance(c, dict) or not c.get("name"):
                     continue
@@ -105,12 +152,11 @@ async def auth_bookmarklet(body: dict):
                 expiry = int(c.get("expirationDate", expiry_far))
                 if not domain.startswith("."):
                     domain = "." + domain
-                include_sub = "TRUE"
-                lines.append(f"{domain}\t{include_sub}\t{path}\t{secure}\t{expiry}\t{name}\t{value}")
+                lines.append(f"{domain}\tTRUE\t{path}\t{secure}\t{expiry}\t{name}\t{value}")
+                cookie_pairs.append(f"{name}={value}")
                 count += 1
 
         elif cookie_string:
-            # Bookmarklet fallback — non-HttpOnly only
             for part in cookie_string.split(";"):
                 part = part.strip()
                 if "=" in part:
@@ -118,6 +164,7 @@ async def auth_bookmarklet(body: dict):
                     key, val = key.strip(), val.strip()
                     lines.append(f".google.com\tTRUE\t/\tFALSE\t{expiry_far}\t{key}\t{val}")
                     lines.append(f".notebooklm.google.com\tTRUE\t/\tFALSE\t{expiry_far}\t{key}\t{val}")
+                    cookie_pairs.append(f"{key}={val}")
                     count += 1
 
         COOKIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -126,32 +173,35 @@ async def auth_bookmarklet(body: dict):
         _auth["cookie_count"] = count
         _auth["source"] = source
 
-        via = "extensão Chrome ✅" if source == "chrome_extension" else "bookmarklet ⚠️ (cookies limitados)"
-        msg = f"✅ {count} cookies salvos via {via}! Sistema NLM ativo."
-        if source == "bookmarklet":
-            msg += " Para auth completa, use a extensão Chrome."
+        # AUTO-INJECT into MCP server (operator does not need to do this)
+        cookie_header = "; ".join(cookie_pairs)
+        mcp_result = await _mcp_save_auth(cookie_header)
+        mcp_ok = mcp_result.get("ok", False)
 
-        return {"message": msg, "count": count, "source": source}
+        msg = f"OK {count} cookies via {'extensao Chrome' if source == 'chrome_extension' else 'bookmarklet'}!"
+        if mcp_ok:
+            msg += " MCP autenticado automaticamente."
+        else:
+            msg += f" (MCP: {mcp_result.get('detail', 'erro')})"
+
+        return {"message": msg, "count": count, "source": source, "mcp_injected": mcp_ok}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
 
 
-# ── Extension ZIP download ─────────────────────────────────────────────────────
+# ── Extension ZIP ──────────────────────────────────────────────────────────────
 
 @app.get("/api/extension.zip")
 async def download_extension():
-    """Serves the Chrome extension as a ZIP for download."""
     if not EXTENSION_DIR.exists():
         raise HTTPException(status_code=404, detail="Extension not found")
-
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in EXTENSION_DIR.rglob("*"):
             if f.is_file():
                 zf.write(f, f.relative_to(EXTENSION_DIR))
     buf.seek(0)
-
     return StreamingResponse(
         buf,
         media_type="application/zip",
@@ -164,7 +214,6 @@ async def health():
     return {"status": "ok"}
 
 
-# ── Static files ───────────────────────────────────────────────────────────────
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

@@ -20,6 +20,7 @@ RUN uv pip install --system \
     notebooklm-mcp-cli \
     "fastapi>=0.110" \
     "uvicorn[standard]>=0.29" \
+    "httpx>=0.27" \
     python-multipart \
     websockets
 
