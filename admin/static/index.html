@@ -4,66 +4,87 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NLM Auth Manager — C8Club</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
       --bg: #050c1a; --surface: rgba(255,255,255,0.04); --border: rgba(255,255,255,0.08);
       --accent: #00d4ff; --accent2: #7c3aed; --success: #10b981;
-      --danger: #ef4444; --text: #e2e8f0; --muted: #64748b; --radius: 16px;
+      --danger: #ef4444; --warn: #f59e0b; --text: #e2e8f0; --muted: #64748b;
     }
-    html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); }
+    html, body { min-height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); }
     body::before {
       content: ''; position: fixed; inset: 0; z-index: -1;
-      background: radial-gradient(ellipse 80% 60% at 20% 10%, rgba(0,212,255,0.06) 0%, transparent 60%),
-                  radial-gradient(ellipse 60% 50% at 80% 80%, rgba(124,58,237,0.08) 0%, transparent 60%), var(--bg);
+      background: radial-gradient(ellipse 80% 60% at 20% 10%, rgba(0,212,255,.06) 0%, transparent 60%),
+                  radial-gradient(ellipse 60% 50% at 80% 80%, rgba(124,58,237,.08) 0%, transparent 60%), var(--bg);
     }
-    .shell { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; gap: 20px; }
+    .shell { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 36px 20px; gap: 18px; }
     .header { display: flex; align-items: center; gap: 12px; }
-    .logo { width: 44px; height: 44px; background: linear-gradient(135deg,var(--accent),var(--accent2)); border-radius:12px; display:grid; place-items:center; font-size:22px; box-shadow:0 0 24px rgba(0,212,255,.3); }
-    .header-text h1 { font-size:20px; font-weight:700; background:linear-gradient(90deg,var(--accent),#818cf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-    .header-text p { font-size:12px; color:var(--muted); margin-top:2px; }
-    .card { width:100%; max-width:540px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:28px 32px; backdrop-filter:blur(20px); }
-    .status-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:22px; }
-    .status-label { font-size:12px; color:var(--muted); font-weight:600; letter-spacing:.5px; text-transform:uppercase; }
-    .badge { display:flex; align-items:center; gap:8px; padding:6px 14px; border-radius:100px; font-size:13px; font-weight:600; }
-    .badge.ok { background:rgba(16,185,129,.15); color:var(--success); border:1px solid rgba(16,185,129,.3); }
-    .badge.no { background:rgba(239,68,68,.1); color:var(--danger); border:1px solid rgba(239,68,68,.2); }
-    .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
-    .badge.ok .dot { animation:pulse 2s infinite; }
-    @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(16,185,129,.5)}50%{box-shadow:0 0 0 6px rgba(16,185,129,0)}}
-    .account-box { display:none; align-items:center; gap:8px; padding:10px 14px; background:rgba(16,185,129,.07); border:1px solid rgba(16,185,129,.15); border-radius:10px; margin-bottom:18px; font-size:13px; color:var(--success); }
-    .account-box.show { display:flex; }
-    .sec-title { font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:14px; }
-    .steps { display:flex; flex-direction:column; gap:12px; margin-bottom:20px; }
-    .step { display:flex; align-items:flex-start; gap:12px; }
-    .sn { width:24px; height:24px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:grid; place-items:center; font-size:11px; font-weight:700; color:#fff; flex-shrink:0; margin-top:1px; }
-    .sc strong { display:block; font-size:14px; font-weight:600; margin-bottom:3px; }
-    .sc span { font-size:12px; color:var(--muted); line-height:1.5; }
-    .sc a { color:var(--accent); }
-    .input-label { font-size:11px; color:var(--muted); margin-bottom:6px; display:block; text-transform:uppercase; letter-spacing:.5px; }
-    .input-field { width:100%; background:rgba(255,255,255,.04); border:1px solid var(--border); border-radius:10px; padding:11px 14px; color:var(--text); font-family:'Inter',sans-serif; font-size:14px; outline:none; transition:border-color .2s; }
-    .input-field:focus { border-color:rgba(0,212,255,.4); }
-    .bm-box { background:rgba(0,212,255,.05); border:2px dashed rgba(0,212,255,.2); border-radius:12px; padding:18px; text-align:center; margin:16px 0; display:none; }
-    .bm-box p { font-size:12px; color:var(--muted); margin-bottom:12px; }
-    .bm-link { display:inline-block; padding:11px 22px; background:linear-gradient(135deg,#0ea5e9,#7c3aed); color:#fff; border-radius:8px; font-weight:600; font-size:14px; text-decoration:none; cursor:grab; box-shadow:0 4px 15px rgba(0,212,255,.25); }
-    .bm-link:active { cursor:grabbing; }
-    .msg { text-align:center; font-size:13px; color:var(--muted); padding:8px; min-height:24px; }
-    .alt-link { font-size:12px; color:var(--accent); cursor:pointer; text-decoration:underline; display:none; }
-    .alt-box { display:none; background:rgba(0,0,0,.3); border:1px solid var(--border); border-radius:10px; padding:14px; margin-top:10px; font-size:12px; color:var(--muted); line-height:1.7; }
-    .alt-box.show { display:block; }
-    .code { font-family:monospace; background:rgba(0,212,255,.1); color:var(--accent); padding:2px 6px; border-radius:4px; font-size:11px; }
-    .code-block { font-family:monospace; background:rgba(0,0,0,.4); border:1px solid rgba(0,212,255,.15); border-radius:8px; padding:10px 12px; font-size:11px; color:var(--accent); word-break:break-all; margin-top:8px; cursor:pointer; }
-    .mcp-card { width:100%; max-width:540px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:18px 24px; }
-    .mcp-card h3 { font-size:12px; color:var(--muted); font-weight:600; letter-spacing:.5px; text-transform:uppercase; margin-bottom:8px; }
-    .url-disp { background:rgba(0,0,0,.3); border:1px solid rgba(0,212,255,.15); border-radius:8px; padding:8px 12px; font-family:monospace; font-size:12px; color:var(--accent); }
-    .mcp-note { font-size:12px; color:var(--muted); margin-top:6px; }
+    .logo { width: 44px; height: 44px; background: linear-gradient(135deg,var(--accent),var(--accent2)); border-radius: 12px; display: grid; place-items: center; font-size: 22px; box-shadow: 0 0 24px rgba(0,212,255,.3); }
+    .header-text h1 { font-size: 20px; font-weight: 700; background: linear-gradient(90deg,var(--accent),#818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .header-text p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .card { width: 100%; max-width: 540px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 26px 30px; backdrop-filter: blur(20px); }
+    .status-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .badge { display: flex; align-items: center; gap: 7px; padding: 5px 13px; border-radius: 100px; font-size: 13px; font-weight: 600; }
+    .badge.ok { background: rgba(16,185,129,.15); color: var(--success); border: 1px solid rgba(16,185,129,.3); }
+    .badge.no { background: rgba(239,68,68,.1); color: var(--danger); border: 1px solid rgba(239,68,68,.2); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+    .badge.ok .dot { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{box-shadow: 0 0 0 0 rgba(16,185,129,.5)} 50%{box-shadow: 0 0 0 5px rgba(16,185,129,0)} }
+    .acct { display: none; align-items: center; gap:8px; padding:8px 12px; background: rgba(16,185,129,.07); border:1px solid rgba(16,185,129,.15); border-radius:8px; margin-bottom:16px; font-size:12px; color:var(--success); }
+    .acct.show { display: flex; }
+    .section-title { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 12px; }
+
+    /* Extension card */
+    .ext-card { background: rgba(0,212,255,.04); border: 1.5px solid rgba(0,212,255,.2); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+    .ext-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .ext-icon { font-size: 24px; }
+    .ext-title { font-size: 15px; font-weight: 700; color: var(--accent); }
+    .ext-sub { font-size: 11px; color: var(--muted); }
+    .badge-recommended { background: rgba(16,185,129,.15); color: var(--success); border: 1px solid rgba(16,185,129,.3); font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 100px; margin-left: auto; }
+    .steps { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+    .step { display: flex; align-items: flex-start; gap: 10px; }
+    .sn { width: 22px; height: 22px; border-radius: 50%; background: linear-gradient(135deg,var(--accent),var(--accent2)); display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; flex-shrink: 0; margin-top: 1px; }
+    .sc strong { display: block; font-size: 13px; font-weight: 600; }
+    .sc span { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .sc a { color: var(--accent); }
+    .btn-dl { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; background: linear-gradient(135deg,#0ea5e9,#7c3aed); color: #fff; text-decoration: none; box-shadow: 0 4px 15px rgba(0,212,255,.2); transition: opacity .2s; }
+    .btn-dl:hover { opacity: .9; }
+
+    .divider { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .divider span { font-size: 11px; color: var(--muted); }
+
+    /* Bookmarklet fallback */
+    .fallback-card { background: rgba(245,158,11,.04); border: 1.5px solid rgba(245,158,11,.2); border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; }
+    .fallback-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--warn); margin-bottom: 10px; }
+    .fallback-note { font-size: 11px; color: var(--muted); margin-bottom: 12px; }
+    .bm-box { background: rgba(0,0,0,.3); border-radius:8px; padding:10px 14px; text-align:center; }
+    .bm-link { display: inline-block; padding: 9px 18px; background: linear-gradient(135deg,#0ea5e9,#7c3aed); color: #fff; border-radius: 7px; font-weight: 600; font-size: 13px; text-decoration: none; cursor: grab; }
+    .bm-link:active { cursor: grabbing; }
+
+    .input-label { font-size: 11px; color: var(--muted); margin-bottom: 5px; display: block; text-transform: uppercase; letter-spacing: .5px; }
+    .input-field { width: 100%; background: rgba(255,255,255,.04); border: 1px solid var(--border); border-radius: 9px; padding: 10px 13px; color: var(--text); font-family: 'Inter', sans-serif; font-size: 13px; outline: none; transition: border-color .2s; margin-bottom: 14px; }
+    .input-field:focus { border-color: rgba(0,212,255,.4); }
+    .msg { font-size: 12px; color: var(--muted); min-height: 18px; margin-top: 8px; }
+    .msg.ok { color: var(--success); }
+    .msg.err { color: var(--danger); }
+    .msg.warn { color: var(--warn); }
+
+    .mcp-card { width: 100%; max-width: 540px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px 22px; }
+    .mcp-card h3 { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .5px; text-transform: uppercase; margin-bottom: 7px; }
+    .url-disp { font-family: monospace; background: rgba(0,0,0,.3); border: 1px solid rgba(0,212,255,.15); border-radius: 7px; padding: 7px 11px; font-size: 12px; color: var(--accent); }
+    .mcp-note { font-size: 11px; color: var(--muted); margin-top: 5px; }
+
+    /* Install guide modal */
+    .install-guide { display: none; background: rgba(0,0,0,.4); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-top: 12px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+    .install-guide.show { display: block; }
+    .code { font-family: monospace; background: rgba(0,212,255,.1); color: var(--accent); padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+    .toggle-link { font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: underline; display: inline-block; margin-top: 6px; }
   </style>
 </head>
 <body>
 <div class="shell">
-
   <div class="header">
     <div class="logo">📓</div>
     <div class="header-text">
@@ -74,48 +95,70 @@
 
   <div class="card">
     <div class="status-row">
-      <span class="status-label">Status do Sistema</span>
+      <span class="section-title" style="margin:0">Status do Sistema</span>
       <div class="badge no" id="badge"><span class="dot"></span><span id="stxt">Verificando...</span></div>
     </div>
-
-    <div class="account-box" id="acctBox">✅ <span id="acctEmail"></span></div>
-
-    <div class="sec-title">Como autenticar — 3 passos simples</div>
-    <div class="steps">
-      <div class="step"><div class="sn">1</div><div class="sc">
-        <strong>Faça login no NotebookLM</strong>
-        <span>Abra <a href="https://notebooklm.google.com" target="_blank">notebooklm.google.com</a> e entre com a conta Google do C8Club.</span>
-      </div></div>
-      <div class="step"><div class="sn">2</div><div class="sc">
-        <strong>Arraste o botão laranja para a barra de favoritos</strong>
-        <span>Faça isso <em>uma única vez</em>. Vira um atalho salvo no navegador para sempre.</span>
-      </div></div>
-      <div class="step"><div class="sn">3</div><div class="sc">
-        <strong>Clique no atalho estando na página do NotebookLM</strong>
-        <span>A autenticação acontece sozinha e aparece confirmada aqui.</span>
-      </div></div>
-    </div>
+    <div class="acct" id="acctBox">✅ <span id="acctEmail">Autenticado com sucesso</span> · <span id="cookieInfo" style="color:var(--muted)"></span></div>
 
     <label class="input-label" for="sInput">Chave de acesso</label>
-    <input type="password" id="sInput" class="input-field" placeholder="Digite a chave de acesso e pressione Enter" />
-    <div class="msg" id="sMsg"></div>
+    <input type="password" id="sInput" class="input-field" placeholder="Digite a chave e pressione Enter" />
 
-    <div class="bm-box" id="bmBox">
-      <p>⬇️ Arraste este botão para a <strong>barra de favoritos</strong> do seu navegador</p>
-      <a id="bmLink" class="bm-link" href="#" title="Arraste para a barra de favoritos">
-        🔑 Autenticar NLM C8Club
+    <!-- OPTION 1: Chrome Extension (recommended) -->
+    <div class="ext-card">
+      <div class="ext-header">
+        <span class="ext-icon">🧩</span>
+        <div>
+          <div class="ext-title">Extensão Chrome</div>
+          <div class="ext-sub">Captura todos os cookies (incluindo HttpOnly) · 1 clique</div>
+        </div>
+        <span class="badge-recommended">RECOMENDADO</span>
+      </div>
+
+      <div class="steps">
+        <div class="step"><div class="sn">1</div><div class="sc">
+          <strong>Baixe e instale a extensão</strong>
+          <span>Clique em <strong>Download Extension</strong> abaixo, depois siga o <span class="toggle-link" onclick="toggleGuide()">guia de instalação</span>.</span>
+        </div></div>
+        <div class="step"><div class="sn">2</div><div class="sc">
+          <strong>Faça login no NotebookLM</strong>
+          <span>Acesse <a href="https://notebooklm.google.com" target="_blank">notebooklm.google.com</a> e entre com a conta Google do C8Club.</span>
+        </div></div>
+        <div class="step"><div class="sn">3</div><div class="sc">
+          <strong>Clique no ícone 📓 na barra do Chrome</strong>
+          <span>Digite a chave acima, clique <strong>Autenticar agora</strong>. Pronto — sistema ativo!</span>
+        </div></div>
+      </div>
+
+      <a class="btn-dl" href="/api/extension.zip" download="nlm-c8club-auth-extension.zip" id="dlBtn">
+        ⬇️ &nbsp;Download Extension (.zip)
       </a>
-      <div class="msg" id="bmMsg"></div>
+
+      <div class="install-guide" id="installGuide">
+        <strong>Como instalar a extensão:</strong><br/>
+        1. Extraia o arquivo <span class="code">.zip</span> baixado em qualquer pasta<br/>
+        2. Abra o Chrome e acesse <span class="code">chrome://extensions/</span><br/>
+        3. Ative o <strong>Modo do desenvolvedor</strong> (toggle no canto superior direito)<br/>
+        4. Clique em <strong>Carregar sem compactação</strong> e selecione a pasta extraída<br/>
+        5. O ícone 📓 aparecerá na barra do Chrome — pronto!<br/>
+        <br/>
+        <strong>⚡ Após instalado, é 1-clique para sempre.</strong>
+      </div>
+      <span class="toggle-link" onclick="toggleGuide()" id="guideToggle">▼ Ver guia de instalação</span>
     </div>
 
-    <span class="alt-link" id="altLink" onclick="toggleAlt()">Não consigo arrastar o botão → ver método alternativo</span>
-    <div class="alt-box" id="altBox">
-      <strong>Método alternativo:</strong><br/>
-      1. Estando em <span class="code">notebooklm.google.com</span>, pressione <span class="code">F12</span><br/>
-      2. Clique na aba <span class="code">Console</span><br/>
-      3. Clique no código abaixo para copiar e cole no Console, depois pressione Enter:<br/>
-      <div class="code-block" id="codeBlock" onclick="copyCode(this)">— Digite a chave acima primeiro —</div>
+    <!-- OPTION 2: Bookmarklet (fallback) -->
+    <div class="fallback-card" id="bmCard" style="display:none">
+      <div class="fallback-title">⚠️ Alternativa: Bookmarklet <em style="font-size:10px;font-weight:400;margin-left:4px">(cookies limitados — sem HttpOnly)</em></div>
+      <p class="fallback-note">Se não conseguir instalar a extensão, use este bookmarklet. A autenticação pode ser instável pois cookies HttpOnly não são capturados.</p>
+      <div class="bm-box">
+        <a id="bmLink" class="bm-link" href="#">🔑 Autenticar NLM C8Club</a>
+        <div class="msg" id="bmMsg"></div>
+      </div>
     </div>
+
+    <div class="msg" id="authMsg"></div>
+
+    <span class="toggle-link" onclick="toggleBookmarklet()" style="font-size:11px;color:var(--muted)">Não tenho Chrome / mostrar alternativa →</span>
   </div>
 
   <div class="mcp-card">
@@ -123,39 +166,34 @@
     <div class="url-disp">http://nlm-service:8080</div>
     <p class="mcp-note">Acessível apenas via rede Docker do Coolify — não exposto à internet.</p>
   </div>
-
 </div>
+
 <script>
   let secret = sessionStorage.getItem('nlm_secret') || '';
-  let tick = '';
+  if (secret) document.getElementById('sInput').value = secret;
 
-  if (secret) { document.getElementById('sInput').value = secret; activate(); }
+  document.getElementById('sInput').addEventListener('change', e => {
+    secret = e.target.value.trim();
+    if (secret) { sessionStorage.setItem('nlm_secret', secret); setupBookmarklet(); }
+  });
 
-  document.getElementById('sInput').addEventListener('keydown', e => { if(e.key==='Enter'){ secret=e.target.value.trim(); sessionStorage.setItem('nlm_secret',secret); activate(); }});
-  document.getElementById('sInput').addEventListener('blur', e => { if(e.target.value.trim()){ secret=e.target.value.trim(); sessionStorage.setItem('nlm_secret',secret); activate(); }});
-
-  function activate() {
-    if (!secret) return;
+  function setupBookmarklet() {
     const api = window.location.origin + '/api/auth-bookmarklet';
     const js = `javascript:(function(){var s="${secret}";fetch("${api}",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({secret:s,cookies:document.cookie,url:location.href})}).then(r=>r.json()).then(d=>alert(d.message||"Enviado!")).catch(e=>alert("Erro: "+e))})()`;
-    const consoleJs = `fetch("${api}",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({secret:"${secret}",cookies:document.cookie,url:location.href})}).then(r=>r.json()).then(d=>alert(d.message))`;
     document.getElementById('bmLink').href = js;
-    document.getElementById('bmBox').style.display = 'block';
-    document.getElementById('altLink').style.display = 'block';
-    document.getElementById('codeBlock').textContent = consoleJs;
-    document.getElementById('sMsg').textContent = '';
+  }
+  if (secret) setupBookmarklet();
+
+  function toggleGuide() {
+    const g = document.getElementById('installGuide');
+    const t = document.getElementById('guideToggle');
+    g.classList.toggle('show');
+    t.textContent = g.classList.contains('show') ? '▲ Fechar guia' : '▼ Ver guia de instalação';
   }
 
-  function toggleAlt() {
-    const b = document.getElementById('altBox'); b.classList.toggle('show');
-    document.getElementById('altLink').textContent = b.classList.contains('show') ? 'Fechar ↑' : 'Não consigo arrastar o botão → ver método alternativo';
-  }
-
-  function copyCode(el) {
-    navigator.clipboard.writeText(el.textContent).then(()=>{
-      const orig = el.textContent; el.textContent = '✅ Copiado!';
-      setTimeout(()=>el.textContent=orig, 1500);
-    });
+  function toggleBookmarklet() {
+    const c = document.getElementById('bmCard');
+    c.style.display = c.style.display === 'none' ? 'block' : 'none';
   }
 
   async function checkStatus() {
@@ -163,17 +201,26 @@
       const d = await (await fetch('/api/status')).json();
       const badge = document.getElementById('badge');
       const stxt = document.getElementById('stxt');
+      const acctBox = document.getElementById('acctBox');
+      const cookieInfo = document.getElementById('cookieInfo');
+
       if (d.status === 'authenticated') {
-        badge.className = 'badge ok'; stxt.textContent = 'Autenticado ✓';
-        const ab = document.getElementById('acctBox');
-        if (d.account) { document.getElementById('acctEmail').textContent = d.account; ab.classList.add('show'); }
+        badge.className = 'badge ok';
+        stxt.textContent = 'Sistema Autenticado ✓';
+        acctBox.classList.add('show');
+        if (d.cookie_count) {
+          cookieInfo.textContent = `${d.cookie_count} cookies · via ${d.source || 'auth'}`;
+        }
       } else {
-        badge.className = 'badge no'; stxt.textContent = 'Não Autenticado';
+        badge.className = 'badge no';
+        stxt.textContent = 'Não Autenticado';
+        acctBox.classList.remove('show');
       }
     } catch(e) {}
   }
 
-  checkStatus(); setInterval(checkStatus, 5000);
+  checkStatus();
+  setInterval(checkStatus, 5000);
 </script>
 </body>
 </html>
