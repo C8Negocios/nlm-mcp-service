@@ -18,23 +18,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium-driver \
     # Virtual display
     xvfb \
-    # VNC server + WebSocket bridge + noVNC HTML5 client
+    # VNC server
     x11vnc \
-    novnc \
-    websockify \
     # Misc
     curl \
     ca-certificates \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
+# Download noVNC HTML5 client (v1.5.0) into /usr/share/novnc
+RUN mkdir -p /usr/share/novnc \
+    && curl -fsSL https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \
+    | tar -xz --strip-components=1 -C /usr/share/novnc
+
+# Install Python packages (websockify via pip — avoids apt package web-dir bug)
 RUN uv pip install --system \
     notebooklm-mcp-cli \
     "fastapi>=0.110" \
     "uvicorn[standard]>=0.29" \
     python-multipart \
-    websockets
+    websockets \
+    websockify
 
 # Copy admin application (includes noVNC static files)
 COPY admin/ ./admin/
