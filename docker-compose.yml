@@ -1,8 +1,6 @@
 services:
   nlm-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/c8negocios/nlm-mcp-service:latest
     container_name: nlm-service
     restart: unless-stopped
     environment:
@@ -11,21 +9,17 @@ services:
       - ADMIN_SECRET=${ADMIN_SECRET:-c8club-nlm-admin}
       - NOTEBOOKLM_HL=pt
     volumes:
-      # Cookies e config persistem entre deploys e restarts
       - nlm_data:/root/.notebooklm-mcp-cli
-    # Port 3000 = Admin UI → exposto publicamente via Traefik
-    # Port 8080 = MCP server → interno apenas (sem label Traefik)
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=coolify"
-      # Admin UI — porta 3000
       - "traefik.http.routers.nlm-admin.rule=Host(`nlm.codigooito.com.br`)"
       - "traefik.http.routers.nlm-admin.entrypoints=https"
       - "traefik.http.routers.nlm-admin.tls=true"
       - "traefik.http.routers.nlm-admin.tls.certresolver=letsencrypt"
       - "traefik.http.services.nlm-admin.loadbalancer.server.port=3000"
     networks:
-      - coolify   # Rede global Coolify — acessível por todos os projetos
+      - coolify
       - default
 
 volumes:
@@ -35,4 +29,3 @@ volumes:
 networks:
   coolify:
     external: true
-

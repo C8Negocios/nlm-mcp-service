@@ -1,43 +1,48 @@
-name: Deploy to Hetzner
+name: Build, Push & Deploy
 
 on:
   push:
     branches: [main]
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/c8negocios/nlm-mcp-service
+
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          host: 157.180.122.109
-          username: root
-          password: ${{ secrets.SSH_PASSWORD }}
-          script: |
-            set -e
-            DEPLOY_DIR="/opt/nlm-mcp-service"
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-            # Clone or pull latest code
-            if [ ! -d "$DEPLOY_DIR/.git" ]; then
-              git clone https://github.com/C8Negocios/nlm-mcp-service.git "$DEPLOY_DIR"
-            else
-              cd "$DEPLOY_DIR" && git pull origin main
-            fi
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/c8negocios/nlm-mcp-service:latest
+            ghcr.io/c8negocios/nlm-mcp-service:${{ github.sha }}
 
-            cd "$DEPLOY_DIR"
+      - name: Trigger Coolify service restart
+        run: |
+          echo "Restarting Coolify service: ${{ secrets.COOLIFY_SERVICE_UUID }}"
+          curl -s -X POST \
+            "http://157.180.122.109:8000/api/v1/services/${{ secrets.COOLIFY_SERVICE_UUID }}/start" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            || echo "Coolify restart triggered (may need manual restart first time)"
 
-            # Write env file from secrets (injected at deploy time)
-            cat > .env << 'ENVEOF'
-            ADMIN_SECRET=${{ secrets.ADMIN_SECRET }}
-            NOTEBOOKLM_MCP_TRANSPORT=http
-            NOTEBOOKLM_MCP_PORT=8080
-            NOTEBOOKLM_HL=pt
-            ENVEOF
-
-            # Rebuild and restart
-            docker compose down --remove-orphans || true
-            docker compose up -d --build
-
-            echo "✅ nlm-mcp-service deployed successfully"
-            docker compose ps
+      - name: Deploy status
+        run: echo "✅ Image pushed to ghcr.io/c8negocios/nlm-mcp-service:latest"
