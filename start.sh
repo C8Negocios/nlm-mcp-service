@@ -1,17 +1,18 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting NLM Platform Service..."
+COOKIE_ENV_FILE="/root/.notebooklm-mcp-cli/cookie_env.txt"
 
-# Start MCP server in background (HTTP/SSE transport on port 8080)
-echo "📡 Starting notebooklm-mcp server on port 8080..."
-NOTEBOOKLM_MCP_TRANSPORT=http \
-NOTEBOOKLM_MCP_PORT=8080 \
-notebooklm-mcp &
+# Load cookie string saved by admin after extension auth
+if [ -f "$COOKIE_ENV_FILE" ]; then
+    export NOTEBOOKLM_COOKIES=$(cat "$COOKIE_ENV_FILE")
+    echo "[start.sh] NOTEBOOKLM_COOKIES loaded (${#NOTEBOOKLM_COOKIES} chars)"
+fi
 
-MCP_PID=$!
-echo "✅ MCP server started (PID: $MCP_PID)"
+# Start MCP server in background — save PID so admin can restart it after re-auth
+NOTEBOOKLM_MCP_TRANSPORT=http NOTEBOOKLM_MCP_PORT=8080 notebooklm-mcp &
+echo $! > /tmp/nlm.pid
+echo "[start.sh] notebooklm-mcp started (PID: $(cat /tmp/nlm.pid))"
 
-# Start Admin UI in foreground on port 3000
-echo "🖥️  Starting Admin UI on port 3000..."
+# Admin UI in foreground (main container process)
 exec uvicorn admin.main:app --host 0.0.0.0 --port 3000 --log-level info

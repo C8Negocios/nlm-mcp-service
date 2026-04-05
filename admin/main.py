@@ -1,18 +1,20 @@
 """
 NLM Admin API — FastAPI backend
-Bookmarklet + Chrome Extension auth.
-After receiving cookies, automatically calls save_auth_tokens on the MCP server.
-The operator just clicks one button — zero manual steps.
+When extension sends cookies:
+  1. Writes cookies.txt (Netscape format)
+  2. Writes cookie_env.txt (plain cookie string for NOTEBOOKLM_COOKIES)
+  3. Kills old notebooklm-mcp process and starts new one with NOTEBOOKLM_COOKIES set
+Operator clicks once — everything else is automatic.
 """
 
-import asyncio
 import io
 import os
+import signal
+import subprocess
 import time
 import zipfile
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -27,12 +29,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", "c8club-nlm-admin")
-COOKIES_DIR = Path("/root/.notebooklm-mcp-cli")
-COOKIES_FILE = COOKIES_DIR / "cookies.txt"
-STATIC_DIR = Path(__file__).parent / "static"
+ADMIN_SECRET  = os.getenv("ADMIN_SECRET", "c8club-nlm-admin")
+COOKIES_DIR   = Path("/root/.notebooklm-mcp-cli")
+COOKIES_FILE  = COOKIES_DIR / "cookies.txt"
+COOKIE_ENV    = COOKIES_DIR / "cookie_env.txt"   # read by start.sh on boot
+NLM_PID_FILE  = Path("/tmp/nlm.pid")
+STATIC_DIR    = Path(__file__).parent / "static"
 EXTENSION_DIR = STATIC_DIR / "extension"
-MCP_URL = "http://localhost:8080/mcp"
 
 _auth = {"status": "idle", "account": None, "cookie_count": 0, "source": None}
 
@@ -42,54 +45,34 @@ def _verify(secret: str):
         raise HTTPException(status_code=401, detail="Acesso nao autorizado")
 
 
-async def _mcp_save_auth(cookie_header: str) -> dict:
+def _restart_nlm(cookie_header: str):
     """
-    Automatically injects cookies into the MCP server via save_auth_tokens.
-    Called right after writing cookies.txt — operator never needs to do this.
+    Kill the running notebooklm-mcp process and restart it with NOTEBOOKLM_COOKIES
+    set in the environment. Returns True if successful.
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Step 1: Initialize MCP session
-            init_resp = await client.post(
-                MCP_URL,
-                json={
-                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "nlm-admin", "version": "1.0"}
-                    }
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream"
-                }
-            )
-            session_id = init_resp.headers.get("mcp-session-id")
-            if not session_id:
-                return {"ok": False, "detail": "No MCP session ID"}
+        # Kill old process
+        if NLM_PID_FILE.exists():
+            try:
+                old_pid = int(NLM_PID_FILE.read_text().strip())
+                os.kill(old_pid, signal.SIGTERM)
+                time.sleep(1)
+            except (ProcessLookupError, ValueError):
+                pass
 
-            # Step 2: Call save_auth_tokens with the cookie string
-            save_resp = await client.post(
-                MCP_URL,
-                json={
-                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                    "params": {
-                        "name": "save_auth_tokens",
-                        "arguments": {"cookies": cookie_header}
-                    }
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                    "Mcp-Session-Id": session_id
-                }
-            )
-            body = save_resp.text
-            return {"ok": True, "detail": body[-300:]}
-
+        # Start new process with cookie env var set
+        env = {**os.environ, "NOTEBOOKLM_COOKIES": cookie_header,
+               "NOTEBOOKLM_MCP_TRANSPORT": "http", "NOTEBOOKLM_MCP_PORT": "8080"}
+        proc = subprocess.Popen(
+            ["notebooklm-mcp"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        NLM_PID_FILE.write_text(str(proc.pid))
+        return True, proc.pid
     except Exception as e:
-        return {"ok": False, "detail": str(e)}
+        return False, str(e)
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
@@ -106,24 +89,24 @@ async def get_status():
     }
 
 
-# ── Auth — receives cookies, saves file, auto-calls MCP save_auth_tokens ───────
+# ── Auth: receives cookies, writes files, restarts nlm with auth ───────────────
 
 @app.post("/api/auth-bookmarklet")
 async def auth_bookmarklet(body: dict):
     """
-    1. Receives cookies from Chrome Extension (includes HttpOnly via chrome.cookies.getAll)
-    2. Writes cookies.txt in Netscape format
-    3. AUTO-CALLS save_auth_tokens on MCP server so nlm authenticates immediately
-    Operator only needs to click one button. Nothing else.
+    1. Receives cookies from Chrome Extension (includes HttpOnly)
+    2. Writes Netscape cookies.txt
+    3. Writes cookie_env.txt (for persistence across container restarts)
+    4. Restarts notebooklm-mcp with NOTEBOOKLM_COOKIES env var — auth is live immediately
     """
     _verify(body.get("secret", ""))
 
-    source = body.get("source", "bookmarklet")
+    source        = body.get("source", "bookmarklet")
     cookie_objects = body.get("cookies", [])
-    cookie_string = body.get("cookies_string", "")
+    cookie_string  = body.get("cookies_string", "")
 
     if isinstance(cookie_objects, str):
-        cookie_string = cookie_objects
+        cookie_string  = cookie_objects
         cookie_objects = []
 
     if not cookie_objects and not cookie_string:
@@ -136,18 +119,18 @@ async def auth_bookmarklet(body: dict):
             "# Netscape HTTP Cookie File",
             "# Generated by NLM Admin Manager - C8Club",
         ]
-        expiry_far = int(time.time()) + (86400 * 365)
-        count = 0
-        cookie_pairs = []  # for MCP cookie_header
+        expiry_far  = int(time.time()) + (86400 * 365)
+        count       = 0
+        cookie_pairs = []
 
         if cookie_objects and isinstance(cookie_objects, list):
             for c in cookie_objects:
                 if not isinstance(c, dict) or not c.get("name"):
                     continue
-                name = c.get("name", "")
-                value = c.get("value", "")
+                name   = c.get("name", "")
+                value  = c.get("value", "")
                 domain = c.get("domain", ".google.com")
-                path = c.get("path", "/")
+                path   = c.get("path", "/")
                 secure = "TRUE" if c.get("secure", False) else "FALSE"
                 expiry = int(c.get("expirationDate", expiry_far))
                 if not domain.startswith("."):
@@ -167,24 +150,28 @@ async def auth_bookmarklet(body: dict):
                     cookie_pairs.append(f"{key}={val}")
                     count += 1
 
+        cookie_header = "; ".join(cookie_pairs)
+
+        # Write Netscape cookies.txt (for legacy compat)
         COOKIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        _auth["status"] = "authenticated"
-        _auth["cookie_count"] = count
-        _auth["source"] = source
+        # Write cookie_env.txt (read by start.sh on next boot for persistence)
+        COOKIE_ENV.write_text(cookie_header, encoding="utf-8")
 
-        # AUTO-INJECT into MCP server (operator does not need to do this)
-        cookie_header = "; ".join(cookie_pairs)
-        mcp_result = await _mcp_save_auth(cookie_header)
-        mcp_ok = mcp_result.get("ok", False)
+        # Restart notebooklm-mcp with env var — auth is LIVE immediately
+        ok, info = _restart_nlm(cookie_header)
+
+        _auth["status"]       = "authenticated"
+        _auth["cookie_count"] = count
+        _auth["source"]       = source
 
         msg = f"OK {count} cookies via {'extensao Chrome' if source == 'chrome_extension' else 'bookmarklet'}!"
-        if mcp_ok:
-            msg += " MCP autenticado automaticamente."
+        if ok:
+            msg += f" NLM reiniciado (PID {info}) — ativo agora."
         else:
-            msg += f" (MCP: {mcp_result.get('detail', 'erro')})"
+            msg += f" Aviso NLM restart: {info}"
 
-        return {"message": msg, "count": count, "source": source, "mcp_injected": mcp_ok}
+        return {"message": msg, "count": count, "source": source, "nlm_restarted": ok}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
@@ -203,8 +190,7 @@ async def download_extension():
                 zf.write(f, f.relative_to(EXTENSION_DIR))
     buf.seek(0)
     return StreamingResponse(
-        buf,
-        media_type="application/zip",
+        buf, media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=nlm-c8club-auth-extension.zip"},
     )
 
