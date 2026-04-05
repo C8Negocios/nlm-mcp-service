@@ -14,11 +14,18 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=coolify"
+      # ── HTTPS (main) ──────────────────────────────────────────────
       - "traefik.http.routers.nlm-admin.rule=Host(`nlm.codigooito.com.br`)"
       - "traefik.http.routers.nlm-admin.entrypoints=https"
       - "traefik.http.routers.nlm-admin.tls=true"
       - "traefik.http.routers.nlm-admin.tls.certresolver=letsencrypt"
       - "traefik.http.services.nlm-admin.loadbalancer.server.port=3000"
+      # ── HTTP → HTTPS redirect ─────────────────────────────────────
+      - "traefik.http.routers.nlm-admin-http.rule=Host(`nlm.codigooito.com.br`)"
+      - "traefik.http.routers.nlm-admin-http.entrypoints=http"
+      - "traefik.http.routers.nlm-admin-http.middlewares=nlm-https-redirect"
+      - "traefik.http.middlewares.nlm-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.nlm-https-redirect.redirectscheme.permanent=true"
     networks:
       - coolify
       - default
