@@ -1,12 +1,12 @@
 """
 NLM Admin API — FastAPI backend
-When extension sends cookies:
-  1. Writes cookies.txt (Netscape format)
-  2. Writes cookie_env.txt (plain cookie string for NOTEBOOKLM_COOKIES)
-  3. Kills old notebooklm-mcp process and starts new one with NOTEBOOKLM_COOKIES set
-Operator clicks once — everything else is automatic.
+Auth flow: operator opens UI → clicks "Iniciar Login" → sees Chrome via noVNC →
+           logs into notebooklm.google.com from the SERVER's browser →
+           clicks "Confirmar Login" → nlm captures server-side session → done.
+Auto-refresh via headless Chrome for 2-4 weeks.
 """
 
+import asyncio
 import io
 import json
 import os
@@ -30,14 +30,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ADMIN_SECRET  = os.getenv("ADMIN_SECRET", "c8club-nlm-admin")
-COOKIES_DIR   = Path("/root/.notebooklm-mcp-cli")
-COOKIES_FILE  = COOKIES_DIR / "cookies.txt"
-COOKIE_ENV    = COOKIES_DIR / "cookie_env.txt"   # read by start.sh on boot
-STATIC_DIR    = Path(__file__).parent / "static"
-EXTENSION_DIR = STATIC_DIR / "extension"
+ADMIN_SECRET   = os.getenv("ADMIN_SECRET", "c8club-nlm-admin")
+COOKIES_DIR    = Path("/root/.notebooklm-mcp-cli")
+COOKIES_FILE   = COOKIES_DIR / "cookies.txt"
+COOKIE_ENV     = COOKIES_DIR / "cookie_env.txt"
+CHROME_PROFILE = COOKIES_DIR / "chrome-profiles/default"
+STATIC_DIR     = Path(__file__).parent / "static"
+EXTENSION_DIR  = STATIC_DIR / "extension"
 
-_auth = {"status": "idle", "account": None, "cookie_count": 0, "source": None}
+_auth   = {"status": "idle", "account": None, "cookie_count": 0, "source": None}
+_login  = {"running": False, "pid": None, "started_at": None}
 
 
 def _verify(secret: str):
@@ -46,72 +48,137 @@ def _verify(secret: str):
 
 
 def _write_nlm_profile(cookie_dict: dict) -> tuple[bool, str]:
-    """
-    Writes cookies directly to the nlm profile JSON files:
-      ~/.notebooklm-mcp-cli/profiles/default/cookies.json  (dict name->value)
-      ~/.notebooklm-mcp-cli/profiles/default/metadata.json
-    This bypasses 'nlm login' entirely — no subprocess, no browser, no Netscape.
-    The nlm MCP server reads this profile on every request.
-    """
+    """Write cookies directly to nlm's profile JSON — no subprocess needed."""
     try:
-        from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
-        profile_dir = get_profile_dir("default")
-    except Exception:
-        # Fallback path if import fails
-        profile_dir = COOKIES_DIR / "profiles" / "default"
+        try:
+            from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
+            profile_dir = get_profile_dir("default")
+        except Exception:
+            profile_dir = COOKIES_DIR / "profiles" / "default"
 
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    profile_dir.chmod(0o700)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir.chmod(0o700)
 
-    cookies_file = profile_dir / "cookies.json"
-    metadata_file = profile_dir / "metadata.json"
+        (profile_dir / "cookies.json").write_text(
+            json.dumps(cookie_dict, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (profile_dir / "cookies.json").chmod(0o600)
 
-    cookies_file.write_text(
-        json.dumps(cookie_dict, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    cookies_file.chmod(0o600)
-
-    metadata_file.write_text(
-        json.dumps({
-            "last_validated": datetime.now().isoformat(),
-            "email": None,
-            "csrf_token": None,
-            "session_id": None,
-        }, indent=2),
-        encoding="utf-8"
-    )
-    metadata_file.chmod(0o600)
-
-    return True, str(cookies_file)
+        (profile_dir / "metadata.json").write_text(
+            json.dumps({
+                "last_validated": datetime.now().isoformat(),
+                "email": None, "csrf_token": None, "session_id": None,
+            }, indent=2),
+            encoding="utf-8"
+        )
+        (profile_dir / "metadata.json").chmod(0o600)
+        return True, str(profile_dir / "cookies.json")
+    except Exception as e:
+        return False, str(e)
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/status")
 async def get_status():
-    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 50:
+    # Check if nlm profile exists (server-side Chrome login done)
+    try:
+        from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
+        profile_dir = get_profile_dir("default")
+    except Exception:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+
+    profile_exists = (profile_dir / "cookies.json").exists()
+
+    if profile_exists:
         _auth["status"] = "authenticated"
+    elif COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 50:
+        _auth["status"] = "authenticated"
+
     return {
         "status": _auth["status"],
         "account": _auth["account"],
         "cookie_count": _auth.get("cookie_count", 0),
         "source": _auth.get("source"),
+        "profile_exists": profile_exists,
+        "login_running": _login["running"],
     }
 
 
-# ── Auth: receives cookies, writes files, restarts nlm with auth ───────────────
+# ── Server-side browser login ──────────────────────────────────────────────────
 
-@app.post("/api/auth-bookmarklet")
-async def auth_bookmarklet(body: dict):
+@app.post("/api/run-nlm-login")
+async def run_nlm_login(body: dict):
     """
-    1. Receives cookies from Chrome Extension (includes HttpOnly)
-    2. Writes Netscape cookies.txt
-    3. Writes cookie_env.txt (for persistence across container restarts)
-    4. Restarts notebooklm-mcp with NOTEBOOKLM_COOKIES env var — auth is live immediately
+    Triggers 'nlm login' inside the container.
+    The operator sees the server's Chrome via noVNC, logs into NotebookLM.
+    nlm detects the login and saves the server-side session profile.
     """
     _verify(body.get("secret", ""))
 
-    source        = body.get("source", "bookmarklet")
+    if _login["running"]:
+        return {"message": "Login ja em andamento. Use o browser ao lado para logar.", "running": True}
+
+    try:
+        proc = subprocess.Popen(
+            ["nlm", "login"],
+            env={**os.environ, "DISPLAY": ":99"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        _login["running"] = True
+        _login["pid"] = proc.pid
+        _login["started_at"] = datetime.now().isoformat()
+
+        return {
+            "message": f"Login iniciado (PID {proc.pid}). Faca login no browser ao lado.",
+            "running": True,
+            "pid": proc.pid
+        }
+    except Exception as e:
+        return {"message": f"Erro: {e}", "running": False}
+
+
+@app.get("/api/login-status")
+async def login_status():
+    """Check if nlm login process is still running."""
+    if _login["pid"]:
+        try:
+            os.kill(_login["pid"], 0)  # Check if process exists
+            running = True
+        except ProcessLookupError:
+            running = False
+            _login["running"] = False
+
+        # Check if profile was created
+        try:
+            from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
+            profile_dir = get_profile_dir("default")
+        except Exception:
+            profile_dir = COOKIES_DIR / "profiles" / "default"
+
+        profile_done = (profile_dir / "cookies.json").exists()
+        if profile_done:
+            _auth["status"] = "authenticated"
+            _login["running"] = False
+
+        return {
+            "running": running,
+            "pid": _login["pid"],
+            "profile_created": profile_done,
+            "started_at": _login.get("started_at"),
+        }
+    return {"running": False, "pid": None, "profile_created": False}
+
+
+# ── Fallback: Chrome Extension cookie injection (keeps backward compat) ────────
+
+@app.post("/api/auth-bookmarklet")
+async def auth_bookmarklet(body: dict):
+    """Fallback: receive cookies from Chrome Extension. Less reliable than browser login."""
+    _verify(body.get("secret", ""))
+
+    source         = body.get("source", "bookmarklet")
     cookie_objects = body.get("cookies", [])
     cookie_string  = body.get("cookies_string", "")
 
@@ -125,10 +192,7 @@ async def auth_bookmarklet(body: dict):
     COOKIES_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        lines = [
-            "# Netscape HTTP Cookie File",
-            "# Generated by NLM Admin Manager - C8Club",
-        ]
+        lines       = ["# Netscape HTTP Cookie File", "# C8Club NLM Admin"]
         expiry_far  = int(time.time()) + (86400 * 365)
         count       = 0
         cookie_pairs = []
@@ -148,7 +212,6 @@ async def auth_bookmarklet(body: dict):
                 lines.append(f"{domain}\tTRUE\t{path}\t{secure}\t{expiry}\t{name}\t{value}")
                 cookie_pairs.append(f"{name}={value}")
                 count += 1
-
         elif cookie_string:
             for part in cookie_string.split(";"):
                 part = part.strip()
@@ -156,34 +219,26 @@ async def auth_bookmarklet(body: dict):
                     key, _, val = part.partition("=")
                     key, val = key.strip(), val.strip()
                     lines.append(f".google.com\tTRUE\t/\tFALSE\t{expiry_far}\t{key}\t{val}")
-                    lines.append(f".notebooklm.google.com\tTRUE\t/\tFALSE\t{expiry_far}\t{key}\t{val}")
                     cookie_pairs.append(f"{key}={val}")
                     count += 1
 
         cookie_header = "; ".join(cookie_pairs)
         cookie_dict   = dict(pair.split("=", 1) for pair in cookie_pairs if "=" in pair)
 
-        # Write Netscape cookies.txt (legacy compat)
         COOKIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        # Write cookie_env.txt (read by start.sh on next boot)
         COOKIE_ENV.write_text(cookie_header, encoding="utf-8")
-
-        # Write directly to nlm profile JSON (what nlm actually reads)
         ok, info = _write_nlm_profile(cookie_dict)
 
         _auth["status"]       = "authenticated"
         _auth["cookie_count"] = count
         _auth["source"]       = source
 
-        msg = f"OK {count} cookies via {'extensao Chrome' if source == 'chrome_extension' else 'bookmarklet'}!"
-        if ok:
-            msg += f" NLM autenticado: {info}"
-        else:
-            msg += f" Aviso nlm login: {info}"
-
-        return {"message": msg, "count": count, "source": source, "nlm_ok": ok}
-
+        return {
+            "message": f"OK {count} cookies via extensao. Nota: pode falhar por validacao Google IP.",
+            "count": count,
+            "source": source,
+            "nlm_ok": ok
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
 
