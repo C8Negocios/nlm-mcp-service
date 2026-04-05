@@ -31,9 +31,11 @@ x11vnc -display :${DISPLAY_NUM} -nopw -listen localhost -xkb -ncache 10 -ncache_
 echo "[start.sh] x11vnc started"
 sleep 1
 
-# ── 4. WebSocket proxy — noVNC connects via ws://host:6080 ────────────────────
-websockify --web /usr/share/novnc 6080 localhost:5900 &
-echo "[start.sh] noVNC WebSocket proxy on :6080"
+# ── 4. WebSocket proxy — noVNC connects via ws://localhost:6081 (internal) ────
+# The admin FastAPI server proxies /ws-vnc -> localhost:6081
+# so NO extra port needs to be exposed through Traefik.
+websockify 6081 localhost:5900 &
+echo "[start.sh] websockify started on :6081"
 
 # ── 5. notebooklm-mcp server ──────────────────────────────────────────────────
 if [ -f "$COOKIE_ENV_FILE" ]; then

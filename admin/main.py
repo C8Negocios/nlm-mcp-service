@@ -16,7 +16,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import websockets
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -266,8 +267,60 @@ async def health():
     return {"status": "ok"}
 
 
+# ── WebSocket proxy: /ws-vnc → localhost:6081 (websockify/VNC) ─────────────────
+
+@app.websocket("/ws-vnc")
+async def vnc_proxy(ws_client: WebSocket):
+    """
+    Proxies the browser's WebSocket connection to the local VNC websockify
+    running on localhost:6081. All VNC traffic goes through the admin HTTPS
+    endpoint — no extra port exposure needed.
+    """
+    # Forward any requested subprotocols (VNC uses 'binary')
+    proto_header = ws_client.headers.get("sec-websocket-protocol", "")
+    subprotocols = [s.strip() for s in proto_header.split(",") if s.strip()]
+    subprotocol = subprotocols[0] if subprotocols else None
+    await ws_client.accept(subprotocol=subprotocol)
+
+    try:
+        ws_kwargs = {}
+        if subprotocols:
+            ws_kwargs["subprotocols"] = [websockets.Subprotocol(s) for s in subprotocols]
+
+        async with websockets.connect("ws://localhost:6081", **ws_kwargs) as ws_server:
+            async def to_server():
+                try:
+                    while True:
+                        data = await ws_client.receive_bytes()
+                        await ws_server.send(data)
+                except (WebSocketDisconnect, Exception):
+                    pass
+
+            async def to_client():
+                try:
+                    async for msg in ws_server:
+                        if isinstance(msg, bytes):
+                            await ws_client.send_bytes(msg)
+                        else:
+                            await ws_client.send_text(msg)
+                except Exception:
+                    pass
+
+            tasks = [asyncio.create_task(to_server()), asyncio.create_task(to_client())]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+    except Exception:
+        pass
+
+
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# noVNC HTML5 client static files (installed via apt novnc → /usr/share/novnc)
+NOVNC_DIR = Path("/usr/share/novnc")
+if NOVNC_DIR.exists():
+    app.mount("/novnc", StaticFiles(directory=str(NOVNC_DIR)), name="novnc")
 
 
 @app.get("/", response_class=HTMLResponse)

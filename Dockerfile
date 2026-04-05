@@ -18,9 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium-driver \
     # Virtual display
     xvfb \
-    # VNC server
+    # VNC server + WebSocket bridge + noVNC HTML5 client
     x11vnc \
-    # WebSocket proxy (turns VNC → WebSocket for noVNC)
+    novnc \
     websockify \
     # Misc
     curl \

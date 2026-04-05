@@ -406,12 +406,14 @@
         msg.className = 'msg info';
         msg.textContent = d.message;
 
-        // Show noVNC iframe
+        // Show noVNC iframe — served by the admin itself at /novnc/
         document.getElementById('vnc-placeholder').style.display = 'none';
         const frame = document.getElementById('vnc-frame');
         frame.style.display = 'block';
-        // noVNC served by websockify on port 6080 (proxied through admin at /vnc/)
-        frame.src = `http://${location.hostname}:6080/vnc.html?autoconnect=true&resize=scale&password=`;
+        // noVNC files served at /novnc by FastAPI; WebSocket proxied at /ws-vnc
+        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const vncPath = `${wsProto}://${location.host}/ws-vnc`;
+        frame.src = `/novnc/vnc.html?autoconnect=true&resize=scale&show_dot=false&path=ws-vnc&encrypt=${location.protocol === 'https:'}`;
         document.getElementById('vnc-hint').textContent = 'Faça login no Google na aba que abriu';
         document.getElementById('badge').className = 'badge run';
         document.getElementById('badge').textContent = 'Login em andamento...';
