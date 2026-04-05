@@ -4,6 +4,10 @@ services:
     pull_policy: always
     container_name: nlm-service
     restart: unless-stopped
+    # Chrome/Chromium requires shared memory and unrestricted seccomp to run in Docker
+    shm_size: '256m'
+    security_opt:
+      - seccomp:unconfined
     environment:
       - NOTEBOOKLM_MCP_TRANSPORT=http
       - NOTEBOOKLM_MCP_PORT=8080

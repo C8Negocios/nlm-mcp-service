@@ -2,40 +2,35 @@
 set -e
 
 COOKIE_ENV_FILE="/root/.notebooklm-mcp-cli/cookie_env.txt"
-CHROME_PROFILE="/root/.notebooklm-mcp-cli/chrome-profiles/default"
 DISPLAY_NUM=99
 
 echo "[start.sh] Starting NLM Platform Service..."
 
-# ── 1. Virtual display (Xvfb) ─────────────────────────────────────────────────
-Xvfb :${DISPLAY_NUM} -screen 0 1366x768x24 -ac +extension GLX &
+# ── 1. Virtual display (Xvfb) — permanente, para o nlm login usar ─────────────
+Xvfb :${DISPLAY_NUM} -screen 0 1366x768x24 -ac &
 export DISPLAY=:${DISPLAY_NUM}
-echo "[start.sh] Xvfb started on :${DISPLAY_NUM}"
+echo "[start.sh] Xvfb :${DISPLAY_NUM} started"
 sleep 1
 
-# ── 2. Chromium (hidden, only used for auth sessions) ─────────────────────────
-chromium \
-    --display=:${DISPLAY_NUM} \
-    --no-sandbox \
-    --disable-dev-shm-usage \
-    --disable-gpu \
-    --user-data-dir="${CHROME_PROFILE}" \
-    --window-size=1366,768 \
-    --start-maximized \
-    "https://notebooklm.google.com" &
-echo "[start.sh] Chromium started"
-sleep 2
+# Grey background + xterm so VNC shows something visible immediately
+xsetroot -solid "#1a1a2e" &
+xterm -geometry 120x30+0+0 -e "echo 'NLM Platform - Pronto. Use a UI para fazer login.' && sleep infinity" &
 
-# ── 3. VNC server — exposes the virtual display ───────────────────────────────
-x11vnc -display :${DISPLAY_NUM} -nopw -listen localhost -xkb -ncache 10 -ncache_cr -forever &
-echo "[start.sh] x11vnc started"
+# ── 2. VNC server over the virtual display ────────────────────────────────────
+x11vnc -display :${DISPLAY_NUM} -nopw -listen localhost -xkb -forever -shared -bg
+echo "[start.sh] x11vnc started on :5900"
 sleep 1
 
-# ── 4. WebSocket proxy via pip websockify (no web dir, admin serves noVNC) ────
+# ── 3. WebSocket proxy (pip websockify) — admin proxies at /ws-vnc ─────────────
 python3 -m websockify 6081 localhost:5900 &
 echo "[start.sh] websockify started on :6081"
 
-# ── 5. notebooklm-mcp server ──────────────────────────────────────────────────
+# NOTE: Chromium is NOT started here.
+# The 'nlm login' command (launched via /api/run-nlm-login) starts its own
+# Chrome instance with the correct flags for the automation flow.
+# It will appear on the VNC display above when invoked.
+
+# ── 4. notebooklm-mcp server ──────────────────────────────────────────────────
 if [ -f "$COOKIE_ENV_FILE" ]; then
     export NOTEBOOKLM_COOKIES=$(cat "$COOKIE_ENV_FILE")
     echo "[start.sh] NOTEBOOKLM_COOKIES loaded (${#NOTEBOOKLM_COOKIES} chars)"
@@ -45,5 +40,5 @@ NOTEBOOKLM_MCP_TRANSPORT=http NOTEBOOKLM_MCP_PORT=8080 notebooklm-mcp &
 echo $! > /tmp/nlm.pid
 echo "[start.sh] notebooklm-mcp started (PID: $(cat /tmp/nlm.pid))"
 
-# ── 6. Admin UI (foreground — main container process) ─────────────────────────
+# ── 5. Admin UI (foreground — main container process) ─────────────────────────
 exec uvicorn admin.main:app --host 0.0.0.0 --port 3000 --log-level info

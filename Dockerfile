@@ -20,6 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     # VNC server
     x11vnc \
+    # X11 utilities (xsetroot for background, xterm for fallback)
+    x11-utils \
+    xterm \
     # Misc
     curl \
     ca-certificates \
