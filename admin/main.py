@@ -9,7 +9,6 @@ Operator clicks once — everything else is automatic.
 
 import io
 import os
-import signal
 import subprocess
 import time
 import zipfile
@@ -33,7 +32,6 @@ ADMIN_SECRET  = os.getenv("ADMIN_SECRET", "c8club-nlm-admin")
 COOKIES_DIR   = Path("/root/.notebooklm-mcp-cli")
 COOKIES_FILE  = COOKIES_DIR / "cookies.txt"
 COOKIE_ENV    = COOKIES_DIR / "cookie_env.txt"   # read by start.sh on boot
-NLM_PID_FILE  = Path("/tmp/nlm.pid")
 STATIC_DIR    = Path(__file__).parent / "static"
 EXTENSION_DIR = STATIC_DIR / "extension"
 
@@ -45,32 +43,24 @@ def _verify(secret: str):
         raise HTTPException(status_code=401, detail="Acesso nao autorizado")
 
 
-def _restart_nlm(cookie_header: str):
+def _nlm_login_manual() -> tuple[bool, str]:
     """
-    Kill the running notebooklm-mcp process and restart it with NOTEBOOKLM_COOKIES
-    set in the environment. Returns True if successful.
+    Runs: nlm login --manual --file <cookies.txt>
+    This is the officially supported way to import cookies without a browser.
+    Creates an authenticated profile that persists across container restarts.
     """
     try:
-        # Kill old process
-        if NLM_PID_FILE.exists():
-            try:
-                old_pid = int(NLM_PID_FILE.read_text().strip())
-                os.kill(old_pid, signal.SIGTERM)
-                time.sleep(1)
-            except (ProcessLookupError, ValueError):
-                pass
-
-        # Start new process with cookie env var set
-        env = {**os.environ, "NOTEBOOKLM_COOKIES": cookie_header,
-               "NOTEBOOKLM_MCP_TRANSPORT": "http", "NOTEBOOKLM_MCP_PORT": "8080"}
-        proc = subprocess.Popen(
-            ["notebooklm-mcp"],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        result = subprocess.run(
+            ["nlm", "login", "--manual", "--file", str(COOKIES_FILE)],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
-        NLM_PID_FILE.write_text(str(proc.pid))
-        return True, proc.pid
+        output = result.stdout + result.stderr
+        if result.returncode == 0:
+            return True, output.strip()[-200:]
+        else:
+            return False, output.strip()[-200:]
     except Exception as e:
         return False, str(e)
 
@@ -152,14 +142,14 @@ async def auth_bookmarklet(body: dict):
 
         cookie_header = "; ".join(cookie_pairs)
 
-        # Write Netscape cookies.txt (for legacy compat)
+        # Write Netscape cookies.txt
         COOKIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        # Write cookie_env.txt (read by start.sh on next boot for persistence)
+        # Write cookie_env.txt (read by start.sh on next boot)
         COOKIE_ENV.write_text(cookie_header, encoding="utf-8")
 
-        # Restart notebooklm-mcp with env var — auth is LIVE immediately
-        ok, info = _restart_nlm(cookie_header)
+        # Run: nlm login --manual --file cookies.txt (no browser needed)
+        ok, info = _nlm_login_manual()
 
         _auth["status"]       = "authenticated"
         _auth["cookie_count"] = count
@@ -167,11 +157,11 @@ async def auth_bookmarklet(body: dict):
 
         msg = f"OK {count} cookies via {'extensao Chrome' if source == 'chrome_extension' else 'bookmarklet'}!"
         if ok:
-            msg += f" NLM reiniciado (PID {info}) — ativo agora."
+            msg += f" NLM autenticado: {info}"
         else:
-            msg += f" Aviso NLM restart: {info}"
+            msg += f" Aviso nlm login: {info}"
 
-        return {"message": msg, "count": count, "source": source, "nlm_restarted": ok}
+        return {"message": msg, "count": count, "source": source, "nlm_ok": ok}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro: {str(e)}")
