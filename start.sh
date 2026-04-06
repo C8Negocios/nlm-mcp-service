@@ -7,17 +7,22 @@ DISPLAY_NUM=99
 echo "[start.sh] Starting NLM Platform Service..."
 
 # ── 1. Virtual display (Xvfb) — permanente, para o nlm login usar ─────────────
+# Limpar locks antigos do X que impedem Xvfb de reiniciar (ex.: Chrome anterior)
+pkill -f Xvfb 2>/dev/null || true
+pkill -f chromium 2>/dev/null || true
+rm -f /tmp/.X${DISPLAY_NUM}-lock /tmp/.X11-unix/X${DISPLAY_NUM} 2>/dev/null || true
+sleep 1
 Xvfb :${DISPLAY_NUM} -screen 0 1366x768x24 -ac &
 export DISPLAY=:${DISPLAY_NUM}
 echo "[start.sh] Xvfb :${DISPLAY_NUM} started"
-sleep 1
+sleep 2
 
 # Grey background + xterm so VNC shows something visible immediately
-xsetroot -solid "#1a1a2e" &
-xterm -geometry 120x30+0+0 -e "echo 'NLM Platform - Pronto. Use a UI para fazer login.' && sleep infinity" &
+xsetroot -solid "#1a1a2e" 2>/dev/null || true &
+xterm -geometry 120x30+0+0 -e "echo 'NLM Platform - Pronto. Use a UI para fazer login.' && sleep infinity" 2>/dev/null || true &
 
 # ── 2. VNC server over the virtual display ────────────────────────────────────
-x11vnc -display :${DISPLAY_NUM} -nopw -listen localhost -xkb -forever -shared -bg
+x11vnc -display :${DISPLAY_NUM} -nopw -listen localhost -xkb -forever -shared -bg || true
 echo "[start.sh] x11vnc started on :5900"
 sleep 1
 
