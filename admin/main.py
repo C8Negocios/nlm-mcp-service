@@ -997,6 +997,14 @@ async def _sync_raiox_once() -> dict:
 
     _raiox_sync_state["forms_found"] = len(forms)
 
+    # Refresh auth tokens (CSRF) antes de iniciar o sync
+    # CSRF tokens do Google expiram — obrigatorio chamar antes de cada batch de source_add
+    try:
+        await _mcp_tool("refresh_auth", {}, timeout=30)
+        logger.info("[raiox-sync] refresh_auth concluido")
+    except Exception as e:
+        logger.warning(f"[raiox-sync] refresh_auth falhou (continuando): {e}")
+
     for form in forms:
         form_id = form["id"]
         form_title = form.get("title", form_id)
