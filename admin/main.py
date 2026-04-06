@@ -803,8 +803,7 @@ def _format_response_as_text(response: dict, field_map: dict, form_title: str) -
     for var in response.get("variables", []):
         lines.append(f"{var.get('key', 'var')}: {var.get('number', var.get('text', ''))}")
 
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def _get_submission_title(response: dict, field_map: dict) -> str:
