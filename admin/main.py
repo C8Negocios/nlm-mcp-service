@@ -767,43 +767,79 @@ async def _tf_fetch_responses(form_id: str, since_token: str | None = None) -> d
     return {"items": all_items, "total_items": len(all_items)}
 
 
-def _format_response_as_text(response: dict, field_map: dict, form_title: str) -> str:
-    """Converte uma resposta do Typeform em texto rico para o NotebookLM."""
+def _sanitize_text(s: str) -> str:
+    """Remove/substitui caracteres que causam rejeição pelo NotebookLM."""
+    if not s:
+        return ""
+    # Manter apenas caracteres imprimíveis Unicode + newlines/tabs
+    import unicodedata
+    cleaned = []
+    for ch in s:
+        cat = unicodedata.category(ch)
+        if ch in ('\n', '\r', '\t'):
+            cleaned.append(ch)
+        elif cat.startswith('C'):  # Control chars
+            cleaned.append(' ')
+        else:
+            cleaned.append(ch)
+    return ''.join(cleaned).strip()
+
+
+def _format_response_as_markdown(response: dict, field_map: dict, form_title: str) -> str:
+    """Converte resposta do Typeform em Markdown estruturado para o NotebookLM."""
     submitted = response.get("submitted_at", "")[:10]
     hidden = response.get("hidden", {})
 
-    # Montar linhas de resposta
     lines = [
-        f"[DIAGNÓSTICO CULTURAL — RAIO-X C8 CLUB]",
-        f"Funil: {form_title}",
-        f"Data: {submitted}",
+        "# Diagnostico Cultural - Raio-X C8 Club",
+        "",
+        f"**Funil:** {_sanitize_text(form_title)}",
+        f"**Data de Submissao:** {submitted}",
     ]
 
-    # Hidden fields (score, empresa, etc. passados via URL)
-    if hidden:
-        for k, v in hidden.items():
-            lines.append(f"{k.replace('_', ' ').title()}: {v}")
+    # Hidden fields (empresa, nome, utm etc. passados via URL)
+    meta = []
+    for k, v in hidden.items():
+        v_str = _sanitize_text(str(v))
+        if v_str and not k.startswith("utm_"):
+            meta.append(f"**{k.replace('_', ' ').title()}:** {v_str}")
+    if meta:
+        lines.append("")
+        lines.append("## Identificacao")
+        lines.extend(meta)
 
     lines.append("")
-    lines.append("=== RESPOSTAS DO DIAGNÓSTICO ===")
+    lines.append("## Respostas do Diagnostico")
+    lines.append("")
 
-    # Answers com título da pergunta
-    for ans in response.get("answers", []):
+    # Answers com titulo da pergunta como header de nivel 3
+    for i, ans in enumerate(response.get("answers", []), 1):
         field = ans.get("field", {})
         ref = field.get("ref", "")
         title = field_map.get(ref, ref) or ref
-        # Limpar títulos com variáveis do typeform
-        if "{{field:" in title:
-            title = title.split("}},")[-1].strip() if "}}" in title else title
-        val = _extract_answer_value(ans)
-        if val and title and not title.startswith("{{"):
-            lines.append(f"{title}: {val}")
+        # Remover variaveis do typeform ({{field:xxx}})
+        if "{{" in title:
+            parts = title.split("}},")
+            title = parts[-1].strip() if len(parts) > 1 else ""
+        title = _sanitize_text(title)
+        val = _sanitize_text(_extract_answer_value(ans))
+        if val and title and not title.startswith("{"):
+            lines.append(f"**{title}**")
+            lines.append(val)
+            lines.append("")
 
     # Variables (score calculado, outcome etc.)
-    for var in response.get("variables", []):
-        lines.append(f"{var.get('key', 'var')}: {var.get('number', var.get('text', ''))}")
+    vars_list = response.get("variables", [])
+    if vars_list:
+        lines.append("## Dados Calculados")
+        for var in vars_list:
+            key = var.get("key", "var")
+            val = str(var.get("number", var.get("text", "")))
+            if val:
+                lines.append(f"- **{key}:** {val}")
 
     return "\n".join(lines)
+
 
 
 def _get_submission_title(response: dict, field_map: dict) -> str:
@@ -894,9 +930,9 @@ async def _sync_raiox_once() -> dict:
                 continue  # Já sincronizado
 
             title = _get_submission_title(response, field_map)
-            content = _format_response_as_text(response, field_map, form_title)
+            content = _format_response_as_markdown(response, field_map, form_title)
 
-            # Adicionar ao notebook via MCP
+            # Adicionar ao notebook via MCP — formato Markdown
             result = await _mcp_tool("source_add", {
                 "notebook_id": RAIOX_NOTEBOOK_ID,
                 "source_type": "text",
@@ -905,29 +941,43 @@ async def _sync_raiox_once() -> dict:
                 "wait": True,
             }, timeout=120)
 
-            # Verificar auth: MCP retorna ok=True mas com erro dentro do content text
+            # Verificar resposta do source_add
             result_text = result.get("text", "")
             result_data = result.get("data") or {}
-            is_auth_error = (
-                not result["ok"]
-                or result_data.get("status") == "error"
-                or "authentication expired" in result_text.lower()
-                or "expired" in result_text.lower()
-            )
+            result_error = result_data.get("error", "") if isinstance(result_data, dict) else ""
 
+            # Auth expirado → abortar sync (MCP precisa de re-login)
+            is_auth_error = (
+                "authentication expired" in result_text.lower()
+                or "authentication expired" in result_error.lower()
+                or "run `nlm login`" in result_text.lower()
+            )
             if is_auth_error:
-                err_msg = result_data.get("error", result_text)[:120]
-                errors.append(f"AUTH: {err_msg}")
-                # Auth expirou — abortar sync completamente
+                errors.append(f"AUTH_EXPIRED: {result_error[:100]}")
                 _save_sync_state({"synced_ids": list(synced_ids)})
                 return {"added": added, "errors": errors, "forms": len(forms),
                         "total_synced": len(synced_ids), "auth_error": True}
 
-            if result["ok"] and result_data.get("status") != "error":
+            # Sucesso real (status=success ou sem erro)
+            is_success = (
+                result["ok"]
+                and result_data.get("status") not in ("error", None)
+                and not result_error
+            ) or (
+                result["ok"]
+                and "success" in result_text.lower()
+            ) or (
+                result["ok"]
+                and result_data.get("source_id")
+            )
+
+            if is_success:
                 synced_ids.add(uid)
                 added += 1
             else:
-                errors.append(f"{title[:40]}: {result_text[:80]}")
+                # Erro de conteúdo — logar e continuar
+                err_msg = result_error or result_text
+                errors.append(f"{title[:40]}: {err_msg[:80]}")
 
         # Breve pausa entre forms para não sobrecarregar MCP
         await asyncio.sleep(1)
