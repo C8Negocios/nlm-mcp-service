@@ -266,30 +266,39 @@ async def login_status():
 async def confirm_login(body: dict):
     """
     After user logs in via Chrome/noVNC:
-    1. Extracts all cookies from Chrome via CDP (port 9222)
-    2. Saves to nlm profile in Playwright format
-    3. Restarts MCP so it picks up the fresh cookies
+    1. Gets PAGE-level WebSocket from Chrome CDP (browser-level returns 0 in Chrome 146+)
+    2. Calls Network.getAllCookies on the page target
+    3. Saves to nlm profile in Playwright format
+    4. Restarts MCP
     """
     _verify(body.get("secret", ""))
 
     cdp_base = "http://127.0.0.1:9222"
 
-    # Check Chrome is running
+    # Get Chrome status and find page-level WebSocket
     try:
         import urllib.request as _req
-        version_data = json.loads(_req.urlopen(f"{cdp_base}/json/version", timeout=5).read())
-        browser_ws = version_data.get("webSocketDebuggerUrl", "")
+        # Get list of pages to find the notebooklm page WebSocket
+        pages_data = json.loads(_req.urlopen(f"{cdp_base}/json/list", timeout=5).read())
+        # Prefer notebooklm page, fallback to first page
+        page_ws = next(
+            (p.get("webSocketDebuggerUrl") for p in pages_data
+             if "notebooklm" in p.get("url", "") or "google" in p.get("url", "")),
+            pages_data[0].get("webSocketDebuggerUrl") if pages_data else None
+        )
+        if not page_ws:
+            return {"success": False, "message": "Chrome nao tem paginas abertas. Certifique-se de que o NotebookLM esta carregado."}
     except Exception as e:
         return {"success": False, "message": f"Chrome nao esta acessivel em porta 9222: {e}"}
 
-    # Extract cookies via CDP WebSocket
+    # Extract cookies via CDP WebSocket (PAGE level — browser level returns 0 in Chrome 146+)
     try:
         import websocket as _ws  # type: ignore
         import threading as _threading
 
         cookies_result: list = []
         done_evt = _threading.Event()
-        call_id_ref = [2]
+        ws_error: list = []
 
         def _on_open(ws_conn):
             ws_conn.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
@@ -302,15 +311,27 @@ async def confirm_login(body: dict):
                 done_evt.set()
                 ws_conn.close()
 
+        def _on_error(ws_conn, err):
+            ws_error.append(str(err))
+            done_evt.set()
+
+        def _on_close(ws_conn, code, msg):
+            done_evt.set()
+
         ws = _ws.WebSocketApp(
-            browser_ws,
-            header={"Origin": "http://localhost"},
+            page_ws,
+            header=["Origin: http://localhost"],  # list format — compatible with all ws-client versions
             on_open=_on_open,
             on_message=_on_message,
+            on_error=_on_error,
+            on_close=_on_close,
         )
         t = _threading.Thread(target=ws.run_forever, daemon=True)
         t.start()
-        done_evt.wait(timeout=10)
+        done_evt.wait(timeout=12)
+
+        if ws_error:
+            return {"success": False, "message": f"Erro ao conectar ao Chrome: {ws_error[0]}. Chrome foi lancado com --remote-allow-origins=*?"}
 
     except Exception as e:
         return {"success": False, "message": f"Erro CDP WebSocket: {e}"}
@@ -322,7 +343,7 @@ async def confirm_login(body: dict):
     ]
 
     if not google_cookies:
-        return {"success": False, "message": f"Nenhum cookie Google encontrado ({len(cookies_result)} total). Voce fez login?"}
+        return {"success": False, "message": f"Nenhum cookie Google encontrado ({len(cookies_result)} total). Certifique-se de estar logado no NotebookLM antes de confirmar."}
 
     # Save in Playwright LIST format
     SAME_SITE_MAP = {"No restriction": "None", "Lax": "Lax", "Strict": "Strict", "": "None", "None": "None"}
@@ -359,6 +380,7 @@ async def confirm_login(body: dict):
         "cookie_count": len(google_cookies),
         "mcp_restarted": mcp_ok,
     }
+
 
 
 # ── Fallback: Chrome Extension cookie injection (keeps backward compat) ────────
