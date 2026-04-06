@@ -149,7 +149,7 @@ def _restart_mcp() -> bool:
             stderr=subprocess.STDOUT,
         )
         # Reset in-memory MCP session state
-        _mcp_session["id"] = None
+        _mcp_session["sid"] = None
         _mcp_session["initialized"] = False
         time.sleep(3)
         logger.info(f"[MCP] Reiniciado (PID {proc.pid})")
@@ -428,7 +428,7 @@ async def confirm_login(body: dict):
             env={**os.environ, "NOTEBOOKLM_MCP_TRANSPORT": "http", "NOTEBOOKLM_MCP_PORT": "8080"},
             stdout=open("/tmp/mcp_restart.log", "w"), stderr=subprocess.STDOUT,
         )
-        _mcp_session["id"] = None
+        _mcp_session["sid"] = None
         _mcp_session["initialized"] = False
         mcp_ok = True
     except Exception:
@@ -624,7 +624,21 @@ async def _mcp_tool(name: str, arguments: dict, timeout: int = 90) -> dict:
 
     if "error" in data:
         err = data["error"]
-        return {"ok": False, "text": err.get("message", str(err)), "data": None}
+        err_msg = err.get("message", str(err))
+        # Session not found → reset e tentar uma vez
+        if "session" in err_msg.lower() or "not found" in err_msg.lower():
+            _mcp_session["sid"] = None
+            _mcp_session["initialized"] = False
+            await _mcp_ensure_session()
+            data = await _mcp_call({
+                "jsonrpc": "2.0", "id": int(time.time() * 1000) % 999999,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }, timeout=timeout)
+            if not data or "error" in data:
+                return {"ok": False, "text": err_msg, "data": None}
+        else:
+            return {"ok": False, "text": err_msg, "data": None}
 
     result = data.get("result", {})
     content = result.get("content", [])
