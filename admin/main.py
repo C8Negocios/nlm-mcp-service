@@ -346,18 +346,13 @@ async def confirm_login(body: dict):
 
     (profile_dir / "cookies.json").write_text(json.dumps(pw, ensure_ascii=False), encoding="utf-8")
     (profile_dir / "cookies.json").chmod(0o600)
-    (profile_dir / "metadata.json").write_text(
-        json.dumps({"last_validated": datetime.now().isoformat(),
-                    "email": "arquitetomais@gmail.com",
-                    "csrf_token": None, "session_id": None, "build_label": "cdp-async"}),
-        encoding="utf-8",
-    )
-
     # ── Fetch CSRF token, bl and session_id from NotebookLM page ─────────────
-    # CRITICAL: The MCP batchexecute API requires a valid X-Goog-Csrf-Token (SNlM0e).
-    # Without it, ALL write operations (source_add, notebook_list) fail with 400.
-    # We fetch the page with auth cookies, extract all tokens, and save to the cache
-    # so the MCP reads them on startup (bypassing the buggy _refresh_auth_tokens flow).
+    # CRITICAL: The auth manager reads csrf_token FROM metadata.json (profile_dir).
+    # We MUST extract the real CSRF BEFORE writing metadata.json.
+    # Without csrf_token, ALL batchexecute calls (source_add, notebook_list) → 400.
+    csrf_token  = ""
+    nlm_session = ""
+    current_bl  = ""
     try:
         import re as _re
         cks = httpx.Cookies()
@@ -377,11 +372,8 @@ async def confirm_login(body: dict):
             )
         html = nlm_resp.text
 
-        # Extract CSRF token (SNlM0e) — required for all batchexecute API calls
         csrf_m = _re.search(r'"SNlM0e":"([^"]+)"', html)
-        # Extract session ID (FdrFJe)
         sid_m  = _re.search(r'"FdrFJe":"([^"]+)"', html)
-        # Extract build label (cfb2h) — the bl parameter for batchexecute URLs
         bl_m   = _re.search(r'"cfb2h":"([^"]+)"', html)
         if not bl_m:
             bl_m = _re.search(r'boq_labs-tailwind-frontend_[\w.]+', html)
@@ -390,23 +382,9 @@ async def confirm_login(body: dict):
         nlm_session = sid_m.group(1)  if sid_m  else ""
         current_bl  = bl_m.group(1)   if bl_m   else ""
 
-        logger.info(f"[confirm-login] CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl} sid={'OK' if nlm_session else 'VAZIO'}")
+        logger.info(f"[confirm-login] CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl}")
 
-        if csrf_token:
-            # Save auth tokens to the cache file the MCP reads on startup
-            import time as _time
-            cache_path = Path("/root/.notebooklm-mcp-cli/auth_tokens.json")
-            cache_data = {
-                "csrf_token":  csrf_token,
-                "session_id":  nlm_session,
-                "build_label": current_bl,
-                "timestamp":   _time.time(),
-            }
-            cache_path.write_text(json.dumps(cache_data, ensure_ascii=False), encoding="utf-8")
-            _auth["csrf_ok"] = True
-            _auth["build_label"] = current_bl
-
-        # Also patch base.py fallback for safety
+        # Patch base.py fallback for safety
         if current_bl:
             base_py = Path("/usr/local/lib/python3.12/site-packages/notebooklm_tools/core/base.py")
             if base_py.exists():
@@ -419,8 +397,25 @@ async def confirm_login(body: dict):
                 if patched != orig:
                     base_py.write_text(patched, encoding="utf-8")
 
+        if csrf_token:
+            _auth["csrf_ok"] = True
+            _auth["build_label"] = current_bl
+
     except Exception as e:
         logger.warning(f"[confirm-login] Falha ao extrair CSRF/bl: {e}")
+
+    # Write profile metadata.json WITH the real CSRF token
+    # The auth manager reads metadata.json → csrf_token to set X-Goog-Csrf-Token
+    (profile_dir / "metadata.json").write_text(
+        json.dumps({
+            "last_validated": datetime.now().isoformat(),
+            "email": "arquitetomais@gmail.com",
+            "csrf_token": csrf_token or None,
+            "session_id": nlm_session or None,
+            "build_label": current_bl or None,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     # Restart MCP async (no time.sleep in event loop)
     try:
