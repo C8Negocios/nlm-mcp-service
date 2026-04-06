@@ -1,5 +1,5 @@
-const API_URL = "http://nlm.codigooito.com.br/api/auth-bookmarklet";
-const STATUS_URL = "http://nlm.codigooito.com.br/api/status";
+const API_URL = "https://nlm.codigooito.com.br/api/auth-bookmarklet";
+const STATUS_URL = "https://nlm.codigooito.com.br/api/status";
 const STORAGE_KEY = "nlm_secret";
 
 // Load saved secret from persistent storage (survives popup close)

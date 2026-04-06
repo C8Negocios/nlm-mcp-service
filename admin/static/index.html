@@ -431,24 +431,46 @@
   }
 
   async function checkLoginDone() {
+    const secret = document.getElementById('secret').value.trim();
+    const btn = document.getElementById('checkBtn');
     const msg = document.getElementById('msg');
+
+    if (!secret) {
+      msg.className = 'msg err';
+      msg.textContent = 'Digite a chave de acesso primeiro.';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Extraindo cookies do Chrome...';
+    msg.className = 'msg info';
+    msg.textContent = 'Conectando ao Chrome e extraindo sessão...';
+
     try {
-      const d = await (await fetch('/api/login-status', { cache: 'no-store' })).json();
-      if (d.profile_created) {
+      const r = await fetch('/api/confirm-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret })
+      });
+      const d = await r.json();
+
+      if (r.ok && d.success) {
         msg.className = 'msg ok';
-        msg.textContent = '✅ Login detectado! Sistema autenticado. Auto-refresh ativo por 2-4 semanas.';
+        msg.textContent = `✅ ${d.message}`;
         document.getElementById('badge').className = 'badge ok';
         document.getElementById('badge').textContent = 'Autenticado ✓';
-        // Hide VNC
         document.getElementById('vnc-frame').style.display = 'none';
         document.getElementById('vnc-placeholder').style.display = 'flex';
       } else {
-        msg.className = 'msg info';
-        msg.textContent = 'Aguardando login... Faça login no Google no browser ao lado.';
+        msg.className = 'msg err';
+        msg.textContent = `❌ ${d.message || 'Erro ao confirmar login. Certifique-se de estar logado no Chrome ao lado.'}`;
       }
     } catch (e) {
       msg.className = 'msg err';
-      msg.textContent = `Erro ao verificar: ${e.message}`;
+      msg.textContent = `Erro: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '✅ Confirmar que fiz login';
     }
   }
 </script>

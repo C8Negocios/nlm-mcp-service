@@ -42,6 +42,7 @@ RUN uv pip install --system \
     python-multipart \
     websockets \
     websockify \
+    websocket-client \
     "httpx>=0.27"
 
 # Copy admin application (includes noVNC static files)

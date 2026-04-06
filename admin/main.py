@@ -74,11 +74,20 @@ def _write_nlm_profile(cookie_objects: list, email: str | None = None) -> tuple[
 
         expiry_far = int(time.time()) + (86400 * 365)
 
+        # Chrome → Playwright sameSite mapping
+        SAME_SITE_MAP = {
+            "no_restriction": "None",
+            "lax":            "Lax",
+            "strict":         "Strict",
+            "unspecified":    "None",
+        }
+
         # Build Playwright-format cookie list
         playwright_cookies = []
         for c in cookie_objects:
             if not isinstance(c, dict) or not c.get("name"):
                 continue
+            chrome_ss = (c.get("sameSite") or "no_restriction").lower()
             playwright_cookies.append({
                 "name":     c.get("name", ""),
                 "value":    c.get("value", ""),
@@ -87,7 +96,7 @@ def _write_nlm_profile(cookie_objects: list, email: str | None = None) -> tuple[
                 "expires":  float(c.get("expirationDate", expiry_far)),
                 "httpOnly": bool(c.get("httpOnly", False)),
                 "secure":   bool(c.get("secure", True)),
-                "sameSite": c.get("sameSite", "None"),
+                "sameSite": SAME_SITE_MAP.get(chrome_ss, "None"),
             })
 
         (profile_dir / "cookies.json").write_text(
@@ -170,9 +179,9 @@ async def get_status():
 @app.post("/api/run-nlm-login")
 async def run_nlm_login(body: dict):
     """
-    Triggers 'nlm login' inside the container.
-    The operator sees the server's Chrome via noVNC, logs into NotebookLM.
-    nlm detects the login and saves the server-side session profile.
+    Launches Chrome on the server (visible via noVNC).
+    User logs into NotebookLM. Then calls /api/confirm-login to extract cookies.
+    Uses direct Chrome launch with CDP enabled (--remote-allow-origins=*).
     """
     _verify(body.get("secret", ""))
 
@@ -180,17 +189,34 @@ async def run_nlm_login(body: dict):
         return {"message": "Login ja em andamento. Use o browser ao lado para logar.", "running": True}
 
     try:
-        # Remove Chrome SingletonLock que impede Chrome de iniciar
+        # Kill existing Chrome instances and clean profile locks
+        subprocess.run(["pkill", "-f", "chromium"], capture_output=True)
+        time.sleep(1)
+
         nlm_chrome = COOKIES_DIR / "chrome-profiles" / "default"
+        nlm_chrome.mkdir(parents=True, exist_ok=True)
         for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
             lock = nlm_chrome / lock_name
             if lock.exists() or lock.is_symlink():
                 lock.unlink(missing_ok=True)
 
+        # Launch Chrome directly with CDP enabled and remote-allow-origins=*
+        # This avoids nlm login's Chrome launcher which crashes in Docker
+        chrome_args = [
+            "/usr/lib/chromium/chromium",
+            "--no-sandbox", "--disable-setuid-sandbox", "--no-zygote",
+            "--disable-dev-shm-usage", "--disable-gpu",
+            "--remote-debugging-port=9222",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-allow-origins=*",
+            f"--user-data-dir={nlm_chrome}",
+            "--start-maximized",
+            "https://notebooklm.google.com",
+        ]
         proc = subprocess.Popen(
-            ["nlm", "login"],
+            chrome_args,
             env={**os.environ, "DISPLAY": ":99"},
-            stdout=subprocess.PIPE,
+            stdout=open("/tmp/chrome_login.log", "w"),
             stderr=subprocess.STDOUT,
         )
         _login["running"] = True
@@ -198,9 +224,9 @@ async def run_nlm_login(body: dict):
         _login["started_at"] = datetime.now().isoformat()
 
         return {
-            "message": f"Login iniciado (PID {proc.pid}). Faca login no browser ao lado.",
+            "message": f"Chrome aberto (PID {proc.pid}). Faca login no browser ao lado. Depois clique em 'Confirmar'.",
             "running": True,
-            "pid": proc.pid
+            "pid": proc.pid,
         }
     except Exception as e:
         return {"message": f"Erro: {e}", "running": False}
@@ -208,16 +234,15 @@ async def run_nlm_login(body: dict):
 
 @app.get("/api/login-status")
 async def login_status():
-    """Check if nlm login process is still running."""
+    """Check if Chrome login process is still running."""
     if _login["pid"]:
         try:
-            os.kill(_login["pid"], 0)  # Check if process exists
+            os.kill(_login["pid"], 0)
             running = True
         except ProcessLookupError:
             running = False
             _login["running"] = False
 
-        # Check if profile was created
         try:
             from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
             profile_dir = get_profile_dir("default")
@@ -227,7 +252,6 @@ async def login_status():
         profile_done = (profile_dir / "cookies.json").exists()
         if profile_done:
             _auth["status"] = "authenticated"
-            _login["running"] = False
 
         return {
             "running": running,
@@ -236,6 +260,105 @@ async def login_status():
             "started_at": _login.get("started_at"),
         }
     return {"running": False, "pid": None, "profile_created": False}
+
+
+@app.post("/api/confirm-login")
+async def confirm_login(body: dict):
+    """
+    After user logs in via Chrome/noVNC:
+    1. Extracts all cookies from Chrome via CDP (port 9222)
+    2. Saves to nlm profile in Playwright format
+    3. Restarts MCP so it picks up the fresh cookies
+    """
+    _verify(body.get("secret", ""))
+
+    cdp_base = "http://127.0.0.1:9222"
+
+    # Check Chrome is running
+    try:
+        import urllib.request as _req
+        version_data = json.loads(_req.urlopen(f"{cdp_base}/json/version", timeout=5).read())
+        browser_ws = version_data.get("webSocketDebuggerUrl", "")
+    except Exception as e:
+        return {"success": False, "message": f"Chrome nao esta acessivel em porta 9222: {e}"}
+
+    # Extract cookies via CDP WebSocket
+    try:
+        import websocket as _ws  # type: ignore
+        import threading as _threading
+
+        cookies_result: list = []
+        done_evt = _threading.Event()
+        call_id_ref = [2]
+
+        def _on_open(ws_conn):
+            ws_conn.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
+            ws_conn.send(json.dumps({"id": 2, "method": "Network.getAllCookies", "params": {}}))
+
+        def _on_message(ws_conn, message):
+            data = json.loads(message)
+            if data.get("id") == 2 and "result" in data:
+                cookies_result.extend(data["result"].get("cookies", []))
+                done_evt.set()
+                ws_conn.close()
+
+        ws = _ws.WebSocketApp(
+            browser_ws,
+            header={"Origin": "http://localhost"},
+            on_open=_on_open,
+            on_message=_on_message,
+        )
+        t = _threading.Thread(target=ws.run_forever, daemon=True)
+        t.start()
+        done_evt.wait(timeout=10)
+
+    except Exception as e:
+        return {"success": False, "message": f"Erro CDP WebSocket: {e}"}
+
+    # Filter Google cookies
+    google_cookies = [
+        c for c in cookies_result
+        if ".google." in c.get("domain", "") or "notebooklm" in c.get("domain", "")
+    ]
+
+    if not google_cookies:
+        return {"success": False, "message": f"Nenhum cookie Google encontrado ({len(cookies_result)} total). Voce fez login?"}
+
+    # Save in Playwright LIST format
+    SAME_SITE_MAP = {"No restriction": "None", "Lax": "Lax", "Strict": "Strict", "": "None", "None": "None"}
+    expiry_far = time.time() + (86400 * 365)
+    playwright_cookies = [{
+        "name":     c.get("name", ""),
+        "value":    c.get("value", ""),
+        "domain":   c.get("domain", ".google.com"),
+        "path":     c.get("path", "/"),
+        "expires":  float(c.get("expires", expiry_far)),
+        "httpOnly": bool(c.get("httpOnly", False)),
+        "secure":   bool(c.get("secure", True)),
+        "sameSite": SAME_SITE_MAP.get(c.get("sameSite", ""), "None"),
+    } for c in google_cookies]
+
+    ok, info = _write_nlm_profile(
+        playwright_cookies,
+        email="arquitetomais@gmail.com",
+    )
+    if not ok:
+        return {"success": False, "message": f"Erro ao salvar profile: {info}"}
+
+    # Restart MCP
+    mcp_ok = _restart_mcp()
+
+    _auth["status"] = "authenticated"
+    _auth["cookie_count"] = len(google_cookies)
+    _auth["source"] = "cdp-extract"
+    _login["running"] = False
+
+    return {
+        "success": True,
+        "message": f"Login confirmado! {len(google_cookies)} cookies salvos. MCP reiniciado: {mcp_ok}.",
+        "cookie_count": len(google_cookies),
+        "mcp_restarted": mcp_ok,
+    }
 
 
 # ── Fallback: Chrome Extension cookie injection (keeps backward compat) ────────
