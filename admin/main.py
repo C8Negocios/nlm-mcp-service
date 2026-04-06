@@ -350,35 +350,64 @@ async def confirm_login(body: dict):
         encoding="utf-8",
     )
 
-    # ── Fetch current build label (bl) from NotebookLM page ─────────────────
-    # The MCP library uses a hardcoded fallback bl that gets stale (causes 400).
-    # We fetch the real one from the page and patch base.py before restarting MCP.
+    # ── Fetch CSRF token, bl and session_id from NotebookLM page ─────────────
+    # CRITICAL: The MCP batchexecute API requires a valid X-Goog-Csrf-Token (SNlM0e).
+    # Without it, ALL write operations (source_add, notebook_list) fail with 400.
+    # We fetch the page with auth cookies, extract all tokens, and save to the cache
+    # so the MCP reads them on startup (bypassing the buggy _refresh_auth_tokens flow).
     try:
-        cookie_header = "; ".join(
-            f"{c['name']}={c['value']}" for c in pw
-            if "google.com" in c.get("domain", "")
-        )
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
-            resp = await cl.get(
+        import re as _re
+        cks = httpx.Cookies()
+        for ck in pw:
+            if ck.get("name") and ck.get("value"):
+                cks.set(ck["name"], ck["value"], domain=ck.get("domain", ".google.com"))
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
+            nlm_resp = await cl.get(
                 "https://notebooklm.google.com",
+                cookies=cks,
                 headers={
-                    "Cookie": cookie_header,
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Accept-Language": "pt-BR,pt;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
                 },
             )
-        html = resp.text
-        import re as _re
-        bl_match = _re.search(r'"bl"\s*:\s*"(boq_labs-tailwind-frontend_[^"]+)"', html)
-        if not bl_match:
-            # Try alternate pattern
-            bl_match = _re.search(r'boq_labs-tailwind-frontend_[\w.]+', html)
-        if bl_match:
-            current_bl = bl_match.group(1) if bl_match.lastindex else bl_match.group(0)
+        html = nlm_resp.text
+
+        # Extract CSRF token (SNlM0e) — required for all batchexecute API calls
+        csrf_m = _re.search(r'"SNlM0e":"([^"]+)"', html)
+        # Extract session ID (FdrFJe)
+        sid_m  = _re.search(r'"FdrFJe":"([^"]+)"', html)
+        # Extract build label (cfb2h) — the bl parameter for batchexecute URLs
+        bl_m   = _re.search(r'"cfb2h":"([^"]+)"', html)
+        if not bl_m:
+            bl_m = _re.search(r'boq_labs-tailwind-frontend_[\w.]+', html)
+
+        csrf_token  = csrf_m.group(1) if csrf_m else ""
+        nlm_session = sid_m.group(1)  if sid_m  else ""
+        current_bl  = bl_m.group(1)   if bl_m   else ""
+
+        logger.info(f"[confirm-login] CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl} sid={'OK' if nlm_session else 'VAZIO'}")
+
+        if csrf_token:
+            # Save auth tokens to the cache file the MCP reads on startup
+            import time as _time
+            cache_path = Path("/root/.notebooklm-mcp-cli/auth_tokens.json")
+            cache_data = {
+                "csrf_token":  csrf_token,
+                "session_id":  nlm_session,
+                "build_label": current_bl,
+                "timestamp":   _time.time(),
+            }
+            cache_path.write_text(json.dumps(cache_data, ensure_ascii=False), encoding="utf-8")
+            _auth["csrf_ok"] = True
+            _auth["build_label"] = current_bl
+
+        # Also patch base.py fallback for safety
+        if current_bl:
             base_py = Path("/usr/local/lib/python3.12/site-packages/notebooklm_tools/core/base.py")
             if base_py.exists():
-                orig = base_py.read_text(encoding="utf-8")
+                orig    = base_py.read_text(encoding="utf-8")
                 patched = _re.sub(
                     r'_BL_FALLBACK\s*=\s*"boq_labs-tailwind-frontend_[^"]+"',
                     f'_BL_FALLBACK = "{current_bl}"',
@@ -386,10 +415,9 @@ async def confirm_login(body: dict):
                 )
                 if patched != orig:
                     base_py.write_text(patched, encoding="utf-8")
-                    logger.info(f"[confirm-login] bl atualizado: {current_bl}")
-                    _auth["build_label"] = current_bl
+
     except Exception as e:
-        logger.warning(f"[confirm-login] Falha ao buscar bl: {e}")
+        logger.warning(f"[confirm-login] Falha ao extrair CSRF/bl: {e}")
 
     # Restart MCP async (no time.sleep in event loop)
     try:
