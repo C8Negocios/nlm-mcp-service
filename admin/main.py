@@ -14,12 +14,15 @@ MCP Proxy Layer:
 import asyncio
 import io
 import json
+import logging
 import os
 import subprocess
 import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger("nlm-admin")
 
 import httpx
 
