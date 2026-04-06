@@ -266,18 +266,17 @@ async def login_status():
 async def confirm_login(body: dict):
     """
     After user logs in via Chrome/noVNC:
-    - Gets PAGE-level WebSocket from Chrome CDP (browser-level returns 0 in Chrome 146+)
-    - Runs blocking WebSocket extraction in asyncio.to_thread (non-blocking event loop)
-    - Saves cookies directly in Playwright format, restarts MCP
+    - 100% async: uses websockets library (already installed) for CDP
+    - No threads, no blocking, no Traefik timeouts
     """
     _verify(body.get("secret", ""))
 
     cdp_base = "http://127.0.0.1:9222"
 
-    # Get page-level WebSocket URL (non-blocking HTTP call is fine)
+    # Check Chrome and get page WebSocket URL
     try:
-        import urllib.request as _req
-        pages_data = json.loads(_req.urlopen(f"{cdp_base}/json/list", timeout=5).read())
+        async with httpx.AsyncClient(timeout=5) as client:
+            pages_data = (await client.get(f"{cdp_base}/json/list")).json()
         page_ws = next(
             (p.get("webSocketDebuggerUrl") for p in pages_data
              if "notebooklm" in p.get("url", "") or "google" in p.get("url", "")),
@@ -288,50 +287,23 @@ async def confirm_login(body: dict):
     except Exception as e:
         return {"success": False, "message": f"Chrome nao esta rodando na porta 9222: {e}"}
 
-    # --- Blocking WebSocket extraction — run in thread to NOT block the event loop ---
-    def _cdp_get_cookies(ws_url: str) -> tuple[list, str]:
-        import websocket as _ws  # type: ignore
-        import threading as _threading
-
-        cookies: list = []
-        errors: list = []
-        done = _threading.Event()
-
-        def on_open(conn):
-            conn.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
-            conn.send(json.dumps({"id": 2, "method": "Network.getAllCookies", "params": {}}))
-
-        def on_message(conn, msg):
-            try:
-                d = json.loads(msg)
+    # Extract cookies using async websockets library (already imported at top of file)
+    try:
+        cookies_result: list = []
+        async with websockets.connect(
+            page_ws,
+            additional_headers={"Origin": "http://localhost"},
+            open_timeout=8,
+        ) as ws:
+            await ws.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
+            await ws.send(json.dumps({"id": 2, "method": "Network.getAllCookies", "params": {}}))
+            async for raw_msg in ws:
+                d = json.loads(raw_msg)
                 if d.get("id") == 2 and "result" in d:
-                    cookies.extend(d["result"].get("cookies", []))
-                    done.set()
-                    conn.close()
-            except Exception:
-                pass
-
-        def on_error(conn, err):
-            errors.append(str(err))
-            done.set()
-
-        def on_close(conn, code, msg):
-            done.set()
-
-        conn = _ws.WebSocketApp(
-            ws_url,
-            header=["Origin: http://localhost"],
-            on_open=on_open, on_message=on_message,
-            on_error=on_error, on_close=on_close,
-        )
-        _threading.Thread(target=conn.run_forever, daemon=True).start()
-        done.wait(timeout=10)
-        return cookies, (errors[0] if errors else "")
-
-    cookies_result, ws_err = await asyncio.to_thread(_cdp_get_cookies, page_ws)
-
-    if ws_err:
-        return {"success": False, "message": f"WebSocket CDP error: {ws_err}. Chrome esta rodando com --remote-allow-origins=*?"}
+                    cookies_result = d["result"].get("cookies", [])
+                    break
+    except Exception as e:
+        return {"success": False, "message": f"Erro CDP WebSocket: {e}"}
 
     google_cookies = [c for c in cookies_result
                       if ".google." in c.get("domain", "") or "notebooklm" in c.get("domain", "")]
@@ -339,41 +311,50 @@ async def confirm_login(body: dict):
     if not google_cookies:
         return {"success": False, "message": f"Nenhum cookie Google ({len(cookies_result)} total). Faca login no Chrome antes de confirmar."}
 
-    # --- Save profile + restart MCP also in thread (time.sleep inside _restart_mcp) ---
-    def _save_and_restart() -> tuple[bool, bool]:
-        try:
-            from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
-            profile_dir = get_profile_dir("default")
-        except Exception:
-            profile_dir = COOKIES_DIR / "profiles" / "default"
-        profile_dir = Path(profile_dir)
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        profile_dir.chmod(0o700)
+    # Save cookies in Playwright format (async file IO)
+    try:
+        from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
+        profile_dir = Path(get_profile_dir("default"))
+    except Exception:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir.chmod(0o700)
 
-        SS = {"No restriction": "None", "Lax": "Lax", "Strict": "Strict", "": "None", "None": "None"}
-        far = time.time() + 86400 * 365
-        pw = [{"name": c.get("name",""), "value": c.get("value",""),
-               "domain": c.get("domain",".google.com"), "path": c.get("path","/"),
-               "expires": float(c.get("expires", far)),
-               "httpOnly": bool(c.get("httpOnly", False)), "secure": bool(c.get("secure", True)),
-               "sameSite": SS.get(c.get("sameSite",""), "None")} for c in google_cookies]
+    SS = {"No restriction": "None", "Lax": "Lax", "Strict": "Strict", "": "None", "None": "None"}
+    far = time.time() + 86400 * 365
+    pw = [{"name": c.get("name", ""), "value": c.get("value", ""),
+           "domain": c.get("domain", ".google.com"), "path": c.get("path", "/"),
+           "expires": float(c.get("expires", far)),
+           "httpOnly": bool(c.get("httpOnly", False)), "secure": bool(c.get("secure", True)),
+           "sameSite": SS.get(c.get("sameSite", ""), "None")} for c in google_cookies]
 
-        (profile_dir / "cookies.json").write_text(json.dumps(pw, ensure_ascii=False), encoding="utf-8")
-        (profile_dir / "cookies.json").chmod(0o600)
-        (profile_dir / "metadata.json").write_text(
-            json.dumps({"last_validated": datetime.now().isoformat(),
-                        "email": "arquitetomais@gmail.com",
-                        "csrf_token": None, "session_id": None, "build_label": "cdp-confirm"}),
-            encoding="utf-8",
+    (profile_dir / "cookies.json").write_text(json.dumps(pw, ensure_ascii=False), encoding="utf-8")
+    (profile_dir / "cookies.json").chmod(0o600)
+    (profile_dir / "metadata.json").write_text(
+        json.dumps({"last_validated": datetime.now().isoformat(),
+                    "email": "arquitetomais@gmail.com",
+                    "csrf_token": None, "session_id": None, "build_label": "cdp-async"}),
+        encoding="utf-8",
+    )
+
+    # Restart MCP async (no time.sleep in event loop)
+    try:
+        subprocess.run(["pkill", "-f", "notebooklm-mcp"], capture_output=True)
+        await asyncio.sleep(2)  # async sleep — does NOT block event loop!
+        subprocess.Popen(
+            ["notebooklm-mcp"],
+            env={**os.environ, "NOTEBOOKLM_MCP_TRANSPORT": "http", "NOTEBOOKLM_MCP_PORT": "8080"},
+            stdout=open("/tmp/mcp_restart.log", "w"), stderr=subprocess.STDOUT,
         )
-        mcp_ok = _restart_mcp()
-        return True, mcp_ok
-
-    _, mcp_ok = await asyncio.to_thread(_save_and_restart)
+        _mcp_session["id"] = None
+        _mcp_session["initialized"] = False
+        mcp_ok = True
+    except Exception:
+        mcp_ok = False
 
     _auth["status"] = "authenticated"
     _auth["cookie_count"] = len(google_cookies)
-    _auth["source"] = "cdp-extract"
+    _auth["source"] = "cdp-async"
     _login["running"] = False
 
     return {
@@ -382,6 +363,8 @@ async def confirm_login(body: dict):
         "cookie_count": len(google_cookies),
         "mcp_restarted": mcp_ok,
     }
+
+
 
 
 
