@@ -905,14 +905,29 @@ async def _sync_raiox_once() -> dict:
                 "wait": True,
             }, timeout=120)
 
-            if result["ok"]:
+            # Verificar auth: MCP retorna ok=True mas com erro dentro do content text
+            result_text = result.get("text", "")
+            result_data = result.get("data") or {}
+            is_auth_error = (
+                not result["ok"]
+                or result_data.get("status") == "error"
+                or "authentication expired" in result_text.lower()
+                or "expired" in result_text.lower()
+            )
+
+            if is_auth_error:
+                err_msg = result_data.get("error", result_text)[:120]
+                errors.append(f"AUTH: {err_msg}")
+                # Auth expirou — abortar sync completamente
+                _save_sync_state({"synced_ids": list(synced_ids)})
+                return {"added": added, "errors": errors, "forms": len(forms),
+                        "total_synced": len(synced_ids), "auth_error": True}
+
+            if result["ok"] and result_data.get("status") != "error":
                 synced_ids.add(uid)
                 added += 1
             else:
-                errors.append(f"{title[:40]}: {result['text'][:80]}")
-                # Se autenticação expirou, parar
-                if "auth" in result["text"].lower() or "expired" in result["text"].lower():
-                    break
+                errors.append(f"{title[:40]}: {result_text[:80]}")
 
         # Breve pausa entre forms para não sobrecarregar MCP
         await asyncio.sleep(1)
