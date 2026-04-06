@@ -350,6 +350,47 @@ async def confirm_login(body: dict):
         encoding="utf-8",
     )
 
+    # ── Fetch current build label (bl) from NotebookLM page ─────────────────
+    # The MCP library uses a hardcoded fallback bl that gets stale (causes 400).
+    # We fetch the real one from the page and patch base.py before restarting MCP.
+    try:
+        cookie_header = "; ".join(
+            f"{c['name']}={c['value']}" for c in pw
+            if "google.com" in c.get("domain", "")
+        )
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as cl:
+            resp = await cl.get(
+                "https://notebooklm.google.com",
+                headers={
+                    "Cookie": cookie_header,
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "pt-BR,pt;q=0.9",
+                },
+            )
+        html = resp.text
+        import re as _re
+        bl_match = _re.search(r'"bl"\s*:\s*"(boq_labs-tailwind-frontend_[^"]+)"', html)
+        if not bl_match:
+            # Try alternate pattern
+            bl_match = _re.search(r'boq_labs-tailwind-frontend_[\w.]+', html)
+        if bl_match:
+            current_bl = bl_match.group(1) if bl_match.lastindex else bl_match.group(0)
+            base_py = Path("/usr/local/lib/python3.12/site-packages/notebooklm_tools/core/base.py")
+            if base_py.exists():
+                orig = base_py.read_text(encoding="utf-8")
+                patched = _re.sub(
+                    r'_BL_FALLBACK\s*=\s*"boq_labs-tailwind-frontend_[^"]+"',
+                    f'_BL_FALLBACK = "{current_bl}"',
+                    orig,
+                )
+                if patched != orig:
+                    base_py.write_text(patched, encoding="utf-8")
+                    logger.info(f"[confirm-login] bl atualizado: {current_bl}")
+                    _auth["build_label"] = current_bl
+    except Exception as e:
+        logger.warning(f"[confirm-login] Falha ao buscar bl: {e}")
+
     # Restart MCP async (no time.sleep in event loop)
     try:
         subprocess.run(["pkill", "-f", "notebooklm-mcp"], capture_output=True)
