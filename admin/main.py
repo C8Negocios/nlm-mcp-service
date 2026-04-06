@@ -46,8 +46,21 @@ CHROME_PROFILE = COOKIES_DIR / "chrome-profiles/default"
 STATIC_DIR     = Path(__file__).parent / "static"
 EXTENSION_DIR  = STATIC_DIR / "extension"
 
+# ── Typeform RaioX Sync config ──────────────────────────────────────────────
+TYPEFORM_TOKEN    = os.getenv("TYPEFORM_TOKEN", "")
+RAIOX_NOTEBOOK_ID = os.getenv("RAIOX_NOTEBOOK_ID", "ee79cded-aaae-4efc-84b0-3d417fa6597d")
+SYNC_STATE_FILE   = COOKIES_DIR / "raiox_sync.json"
+RAIOX_SYNC_INTERVAL = int(os.getenv("RAIOX_SYNC_INTERVAL_SECONDS", "300"))  # 5 min default
+
 _auth   = {"status": "idle", "account": None, "cookie_count": 0, "source": None}
 _login  = {"running": False, "pid": None, "started_at": None}
+_raiox_sync_state = {
+    "running": False,
+    "last_sync": None,
+    "total_synced": 0,
+    "last_error": None,
+    "forms_found": 0,
+}
 
 
 def _verify(secret: str):
@@ -659,6 +672,341 @@ async def source_add(body: dict):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao adicionar source: {str(e)}")
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TYPEFORM → NOTEBOOKLM RAIOX SYNC
+# Sincroniza todas as respostas dos 16 funis "RAIO-X CULTURAL" automaticamente
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_sync_state() -> dict:
+    """Carrega IDs já sincronizados do arquivo local."""
+    if SYNC_STATE_FILE.exists():
+        try:
+            return json.loads(SYNC_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"synced_ids": []}
+
+
+def _save_sync_state(state: dict):
+    """Persiste IDs sincronizados."""
+    SYNC_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SYNC_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _extract_answer_value(ans: dict) -> str:
+    """Extrai o valor legível de um answer do Typeform."""
+    atype = ans.get("type", "")
+    val = ans.get(atype)
+    if val is None:
+        val = ans.get("text") or ans.get("number") or ans.get("float") or ""
+    if isinstance(val, dict):
+        # choice ou choices
+        val = val.get("label") or val.get("other") or ", ".join(
+            c.get("label", "") for c in val.get("labels", [])
+        ) or str(val)
+    if isinstance(val, list):
+        val = ", ".join(
+            (x.get("label", "") if isinstance(x, dict) else str(x)) for x in val
+        )
+    return str(val).strip()
+
+
+async def _tf_fetch_form_fields(form_id: str) -> dict:
+    """Retorna mapeamento ref → title das perguntas do formulário."""
+    if not TYPEFORM_TOKEN:
+        return {}
+    headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"https://api.typeform.com/forms/{form_id}",
+                headers=headers,
+            )
+            r.raise_for_status()
+            data = r.json()
+    except Exception:
+        return {}
+    return {
+        f.get("ref", ""): f.get("title", "")
+        for f in data.get("fields", [])
+    }
+
+
+async def _tf_fetch_responses(form_id: str, since_token: str | None = None) -> dict:
+    """Busca todas as respostas paginadas de um formulário Typeform."""
+    if not TYPEFORM_TOKEN:
+        return {"items": [], "total_items": 0}
+    headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
+    all_items = []
+    before = None
+    while True:
+        params = {"page_size": 200}
+        if before:
+            params["before"] = before
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.get(
+                    f"https://api.typeform.com/forms/{form_id}/responses",
+                    headers=headers,
+                    params=params,
+                )
+                r.raise_for_status()
+                data = r.json()
+        except Exception:
+            break
+        items = data.get("items", [])
+        all_items.extend(items)
+        # Se veio menos de 200, não há mais páginas
+        if len(items) < 200:
+            break
+        # Paginação reversa: pegar o token do mais antigo
+        before = items[-1].get("token")
+    return {"items": all_items, "total_items": len(all_items)}
+
+
+def _format_response_as_text(response: dict, field_map: dict, form_title: str) -> str:
+    """Converte uma resposta do Typeform em texto rico para o NotebookLM."""
+    submitted = response.get("submitted_at", "")[:10]
+    hidden = response.get("hidden", {})
+
+    # Montar linhas de resposta
+    lines = [
+        f"[DIAGNÓSTICO CULTURAL — RAIO-X C8 CLUB]",
+        f"Funil: {form_title}",
+        f"Data: {submitted}",
+    ]
+
+    # Hidden fields (score, empresa, etc. passados via URL)
+    if hidden:
+        for k, v in hidden.items():
+            lines.append(f"{k.replace('_', ' ').title()}: {v}")
+
+    lines.append("")
+    lines.append("=== RESPOSTAS DO DIAGNÓSTICO ===")
+
+    # Answers com título da pergunta
+    for ans in response.get("answers", []):
+        field = ans.get("field", {})
+        ref = field.get("ref", "")
+        title = field_map.get(ref, ref) or ref
+        # Limpar títulos com variáveis do typeform
+        if "{{field:" in title:
+            title = title.split("}},")[-1].strip() if "}}" in title else title
+        val = _extract_answer_value(ans)
+        if val and title and not title.startswith("{{"):
+            lines.append(f"{title}: {val}")
+
+    # Variables (score calculado, outcome etc.)
+    for var in response.get("variables", []):
+        lines.append(f"{var.get('key', 'var')}: {var.get('number', var.get('text', ''))}")
+
+    return "
+".join(lines)
+
+
+def _get_submission_title(response: dict, field_map: dict) -> str:
+    """Gera título curto para o source: 'Empresa — Nome' ou data."""
+    hidden = response.get("hidden", {})
+    empresa = hidden.get("empresa") or hidden.get("company") or hidden.get("nome_empresa", "")
+    nome = hidden.get("nome") or hidden.get("name") or ""
+
+    # Tentar extrair da primeira pergunta (usually nome)
+    if not nome and response.get("answers"):
+        first_ans = response["answers"][0]
+        val = _extract_answer_value(first_ans)
+        if val and len(val) < 60:
+            nome = val
+    if not empresa and len(response.get("answers", [])) > 2:
+        # Tentar segunda pergunta como empresa
+        second_ans = response["answers"][1]
+        val = _extract_answer_value(second_ans)
+        if val and len(val) < 80:
+            empresa = val
+
+    parts = [e for e in [empresa, nome] if e]
+    if parts:
+        return " — ".join(parts[:2])
+    return f"Diagnóstico {response.get('submitted_at', '')[:10]}"
+
+
+async def _discover_cultural_forms() -> list[dict]:
+    """Descobre todos os forms RAIO-X CULTURAL via Typeform API."""
+    if not TYPEFORM_TOKEN:
+        return []
+    headers = {"Authorization": f"Bearer {TYPEFORM_TOKEN}"}
+    all_forms = []
+    page = 1
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(
+                    "https://api.typeform.com/forms",
+                    headers=headers,
+                    params={"page_size": 200, "page": page},
+                )
+                r.raise_for_status()
+                data = r.json()
+        except Exception:
+            break
+        items = data.get("items", [])
+        all_forms.extend(items)
+        if len(items) < 200:
+            break
+        page += 1
+    return [f for f in all_forms if "RAIO-X CULTURAL" in f.get("title", "").upper()]
+
+
+async def _sync_raiox_once() -> dict:
+    """
+    Executa uma rodada completa de sincronização:
+    1. Descobre os 16 formulários RAIO-X CULTURAL
+    2. Para cada form: busca respostas novas
+    3. Formata como texto e adiciona ao notebook via MCP
+    4. Persiste IDs sincronizados
+    Retorna dict com stats da rodada.
+    """
+    state = _load_sync_state()
+    synced_ids = set(state.get("synced_ids", []))
+    added = 0
+    errors = []
+
+    forms = await _discover_cultural_forms()
+    if not forms:
+        return {"added": 0, "errors": ["TYPEFORM_TOKEN ausente ou API inacessível"], "forms": 0}
+
+    _raiox_sync_state["forms_found"] = len(forms)
+
+    for form in forms:
+        form_id = form["id"]
+        form_title = form.get("title", form_id)
+
+        # Buscar mapeamento de campos e respostas
+        field_map, resp_data = await asyncio.gather(
+            _tf_fetch_form_fields(form_id),
+            _tf_fetch_responses(form_id),
+        )
+
+        for response in resp_data.get("items", []):
+            uid = f"{form_id}::{response.get('response_id', response.get('token', ''))}"
+            if uid in synced_ids:
+                continue  # Já sincronizado
+
+            title = _get_submission_title(response, field_map)
+            content = _format_response_as_text(response, field_map, form_title)
+
+            # Adicionar ao notebook via MCP
+            result = await _mcp_tool("source_add", {
+                "notebook_id": RAIOX_NOTEBOOK_ID,
+                "source_type": "text",
+                "title": title[:200],
+                "text": content,
+                "wait": True,
+            }, timeout=120)
+
+            if result["ok"]:
+                synced_ids.add(uid)
+                added += 1
+            else:
+                errors.append(f"{title[:40]}: {result['text'][:80]}")
+                # Se autenticação expirou, parar
+                if "auth" in result["text"].lower() or "expired" in result["text"].lower():
+                    break
+
+        # Breve pausa entre forms para não sobrecarregar MCP
+        await asyncio.sleep(1)
+
+    # Persistir state
+    state["synced_ids"] = list(synced_ids)
+    _save_sync_state(state)
+
+    return {"added": added, "errors": errors, "forms": len(forms), "total_synced": len(synced_ids)}
+
+
+async def _raiox_sync_loop():
+    """Background loop que roda sync a cada RAIOX_SYNC_INTERVAL segundos."""
+    # Aguardar MCP inicializar
+    await asyncio.sleep(15)
+    while True:
+        if not _raiox_sync_state["running"]:
+            _raiox_sync_state["running"] = True
+            try:
+                stats = await _sync_raiox_once()
+                _raiox_sync_state["last_sync"] = datetime.now().isoformat()
+                _raiox_sync_state["total_synced"] += stats.get("added", 0)
+                _raiox_sync_state["last_error"] = stats["errors"][0] if stats["errors"] else None
+                _raiox_sync_state["forms_found"] = stats.get("forms", 0)
+            except Exception as e:
+                _raiox_sync_state["last_error"] = str(e)[:200]
+            finally:
+                _raiox_sync_state["running"] = False
+        await asyncio.sleep(RAIOX_SYNC_INTERVAL)
+
+
+@app.on_event("startup")
+async def start_raiox_sync():
+    """Inicia o loop de sync em background no startup do servidor."""
+    asyncio.create_task(_raiox_sync_loop())
+
+
+@app.get("/api/raiox-status")
+async def raiox_status():
+    """Status do sync e quantidade de leads no notebook."""
+    state = _load_sync_state()
+    synced_ids = state.get("synced_ids", [])
+    return {
+        "synced_total": len(synced_ids),
+        "last_sync": _raiox_sync_state["last_sync"],
+        "running": _raiox_sync_state["running"],
+        "forms_found": _raiox_sync_state["forms_found"],
+        "last_error": _raiox_sync_state["last_error"],
+        "sync_interval_seconds": RAIOX_SYNC_INTERVAL,
+    }
+
+
+@app.post("/api/raiox-sync-now")
+async def raiox_sync_now(body: dict = {}):
+    """Dispara sincronização manual imediata."""
+    _verify(body.get("secret", ""))
+    if _raiox_sync_state["running"]:
+        return {"ok": False, "message": "Sync já está em andamento"}
+    # Roda em background para não bloquear a resposta
+    asyncio.create_task(_run_sync_now())
+    return {"ok": True, "message": "Sincronização iniciada em background"}
+
+
+async def _run_sync_now():
+    _raiox_sync_state["running"] = True
+    try:
+        stats = await _sync_raiox_once()
+        _raiox_sync_state["last_sync"] = datetime.now().isoformat()
+        _raiox_sync_state["total_synced"] += stats.get("added", 0)
+        _raiox_sync_state["last_error"] = stats["errors"][0] if stats["errors"] else None
+        _raiox_sync_state["forms_found"] = stats.get("forms", 0)
+    except Exception as e:
+        _raiox_sync_state["last_error"] = str(e)[:200]
+    finally:
+        _raiox_sync_state["running"] = False
+
+
+@app.post("/api/typeform-webhook")
+async def typeform_webhook(body: dict):
+    """
+    Webhook do Typeform: dispara sync imediato quando um novo formulário é submetido.
+    Configurar no painel Typeform:
+      URL: https://nlm.codigooito.com.br/api/typeform-webhook
+      Event: form_response
+    """
+    # Typeform envia form_id no payload
+    form_id = body.get("form_response", {}).get("form_id", "")
+    # Verifica se é um dos forms RAIO-X CULTURAL (ou aceita qualquer, dado que
+    # o sync filtra automaticamente)
+    if not _raiox_sync_state["running"]:
+        asyncio.create_task(_run_sync_now())
+    return {"ok": True, "form_id": form_id}
+
 
 
 # ── WebSocket proxy: /ws-vnc → localhost:6081 (websockify/VNC) ─────────────────

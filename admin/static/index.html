@@ -320,7 +320,29 @@
       </div>
     </div>
 
+    <div class="divider"></div>
+
+    <!-- RaioX Sync Status -->
+    <div class="card">
+      <div class="card-title">📊 Sync RaioX Cultural</div>
+      <div id="sync-badge" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue);margin-bottom:12px;">
+        <span id="sync-dot" style="width:7px;height:7px;border-radius:50%;background:var(--blue);"></span>
+        <span id="sync-status-text">Carregando...</span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);display:grid;gap:4px;" id="sync-details">
+        <div>Leads sincronizados: <strong id="sync-count">—</strong></div>
+        <div>Funis ativos: <strong id="sync-forms">—</strong></div>
+        <div>Última sync: <strong id="sync-last">—</strong></div>
+        <div id="sync-error-row" style="display:none;color:var(--red);font-size:11px;" id="sync-error-text"></div>
+      </div>
+      <div style="height:12px"></div>
+      <button class="btn btn-secondary" id="syncNowBtn" onclick="syncNow()" style="font-size:12px;padding:8px 14px;">
+        🔄 Sincronizar Agora
+      </button>
+    </div>
+
   </aside>
+
 
   <!-- ── Main — noVNC viewer ──────────────────────────────────── -->
   <main class="main">
@@ -473,6 +495,70 @@
       btn.textContent = '✅ Confirmar que fiz login';
     }
   }
+
+  // ── RaioX Sync ─────────────────────────────────────────────
+  async function checkSyncStatus() {
+    try {
+      const d = await (await fetch('/api/raiox-status', { cache: 'no-store' })).json();
+      const dot = document.getElementById('sync-dot');
+      const txt = document.getElementById('sync-status-text');
+      const badge = document.getElementById('sync-badge');
+
+      if (d.running) {
+        dot.style.background = 'var(--amber)';
+        badge.style.background = 'var(--amber-dim)';
+        badge.style.color = 'var(--amber)';
+        txt.textContent = 'Sincronizando...';
+      } else if (d.last_error) {
+        dot.style.background = 'var(--red)';
+        badge.style.background = 'rgba(239,68,68,0.1)';
+        badge.style.color = 'var(--red)';
+        txt.textContent = 'Erro no sync';
+        const errRow = document.getElementById('sync-error-row');
+        errRow.style.display = 'block';
+        errRow.textContent = '⚠ ' + d.last_error.substring(0, 80);
+      } else if (d.last_sync) {
+        dot.style.background = 'var(--green)';
+        badge.style.background = 'var(--green-dim)';
+        badge.style.color = 'var(--green)';
+        txt.textContent = 'Sincronizado ✓';
+      } else {
+        txt.textContent = 'Aguardando...';
+      }
+
+      document.getElementById('sync-count').textContent = d.synced_total ?? '—';
+      document.getElementById('sync-forms').textContent = d.forms_found ? `${d.forms_found} funis` : '—';
+      if (d.last_sync) {
+        const dt = new Date(d.last_sync);
+        document.getElementById('sync-last').textContent = dt.toLocaleTimeString('pt-BR');
+      }
+    } catch { }
+  }
+
+  async function syncNow() {
+    const secret = document.getElementById('secret').value.trim();
+    if (!secret) { alert('Digite a chave de acesso primeiro.'); return; }
+    const btn = document.getElementById('syncNowBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Iniciando...';
+    try {
+      const r = await fetch('/api/raiox-sync-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ secret })
+      });
+      const d = await r.json();
+      btn.textContent = d.ok ? '✅ Sync iniciado!' : '❌ ' + d.message;
+      setTimeout(() => checkSyncStatus(), 2000);
+    } catch (e) {
+      btn.textContent = '❌ Erro';
+    } finally {
+      setTimeout(() => { btn.disabled = false; btn.textContent = '🔄 Sincronizar Agora'; }, 3000);
+    }
+  }
+
+  checkSyncStatus();
+  setInterval(checkSyncStatus, 10000);
 </script>
 
 </body>
