@@ -139,23 +139,27 @@ def _write_nlm_profile(cookie_objects: list, email: str | None = None) -> tuple[
 def _restart_mcp() -> bool:
     """Kill existing MCP process and restart it so it picks up new cookies."""
     try:
-        # Kill running MCP instances
         subprocess.run(["pkill", "-f", "notebooklm-mcp"], capture_output=True)
         time.sleep(2)
-        # Restart MCP in background
+        mcp_env = {
+            **os.environ,
+            "NOTEBOOKLM_MCP_TRANSPORT": "http",
+            "NOTEBOOKLM_MCP_PORT": "8080",
+        }
+        # Passar bl atual se disponível (evita usar o fallback stale)
+        cached_bl = _auth.get("build_label") or os.environ.get("NOTEBOOKLM_BL", "")
+        if cached_bl:
+            mcp_env["NOTEBOOKLM_BL"] = cached_bl
         proc = subprocess.Popen(
             ["notebooklm-mcp"],
-            env={**os.environ,
-                 "NOTEBOOKLM_MCP_TRANSPORT": "http",
-                 "NOTEBOOKLM_MCP_PORT": "8080"},
+            env=mcp_env,
             stdout=open("/tmp/mcp_restart.log", "w"),
             stderr=subprocess.STDOUT,
         )
-        # Reset in-memory MCP session state
         _mcp_session["sid"] = None
         _mcp_session["initialized"] = False
         time.sleep(3)
-        logger.info(f"[MCP] Reiniciado (PID {proc.pid})")
+        logger.info(f"[MCP] Reiniciado (PID {proc.pid}) bl={cached_bl[:20] if cached_bl else 'fallback'}")
         return True
     except Exception as e:
         logger.error(f"[MCP] Falha ao reiniciar: {e}")
@@ -417,19 +421,31 @@ async def confirm_login(body: dict):
         encoding="utf-8",
     )
 
-    # Restart MCP async (no time.sleep in event loop)
+    # Restart MCP async — CRITICAL: pass NOTEBOOKLM_BL so MCP usa o bl atual
+    # sem isso, MCP usa _BL_FALLBACK stale e source_add falha com 400
     try:
         subprocess.run(["pkill", "-f", "notebooklm-mcp"], capture_output=True)
-        await asyncio.sleep(2)  # async sleep — does NOT block event loop!
+        await asyncio.sleep(2)
+        mcp_env = {
+            **os.environ,
+            "NOTEBOOKLM_MCP_TRANSPORT": "http",
+            "NOTEBOOKLM_MCP_PORT": "8080",
+        }
+        # Injetar bl e csrf extraídos do HTML do NotebookLM
+        if current_bl:
+            mcp_env["NOTEBOOKLM_BL"] = current_bl
+            os.environ["NOTEBOOKLM_BL"] = current_bl  # persiste para syncs futuros
+            logger.info(f"[confirm-login] Reiniciando MCP com NOTEBOOKLM_BL={current_bl}")
         subprocess.Popen(
             ["notebooklm-mcp"],
-            env={**os.environ, "NOTEBOOKLM_MCP_TRANSPORT": "http", "NOTEBOOKLM_MCP_PORT": "8080"},
+            env=mcp_env,
             stdout=open("/tmp/mcp_restart.log", "w"), stderr=subprocess.STDOUT,
         )
         _mcp_session["sid"] = None
         _mcp_session["initialized"] = False
         mcp_ok = True
-    except Exception:
+    except Exception as e:
+        logger.error(f"[confirm-login] Falha ao reiniciar MCP: {e}")
         mcp_ok = False
 
     _auth["status"] = "authenticated"
