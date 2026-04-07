@@ -479,12 +479,21 @@ async def confirm_login(body: dict):
         mcp_ok = True
     except Exception as e:
         logger.error(f"[confirm-login] Falha ao reiniciar MCP: {e}")
+        log_event("error", f"Falha ao reiniciar MCP: {e}", "confirm-login")
         mcp_ok = False
 
     _auth["status"] = "authenticated"
     _auth["cookie_count"] = len(google_cookies)
     _auth["source"] = "cdp-async"
     _login["running"] = False
+
+    log_event("ok",
+        f"{len(google_cookies)} cookies salvos. "
+        f"CSRF={'OK' if csrf_token else 'VAZIO'} "
+        f"bl={current_bl[:30] if current_bl else 'VAZIO'} | "
+        f"html_status={html_status} | MCP reiniciado: {mcp_ok}",
+        "confirm-login"
+    )
 
     return {
         "success": True,
@@ -667,6 +676,7 @@ async def _mcp_tool(name: str, arguments: dict, timeout: int = 90) -> dict:
     }, timeout=timeout)
 
     if not data:
+        log_event("error", f"MCP sem resposta para tool={name}", "mcp")
         return {"ok": False, "text": "Sem resposta do MCP", "data": None}
 
     if "error" in data:
@@ -683,8 +693,10 @@ async def _mcp_tool(name: str, arguments: dict, timeout: int = 90) -> dict:
                 "params": {"name": name, "arguments": arguments},
             }, timeout=timeout)
             if not data or "error" in data:
+                log_event("error", f"MCP tool={name} falhou mesmo após retry: {err_msg}", "mcp")
                 return {"ok": False, "text": err_msg, "data": None}
         else:
+            log_event("error", f"MCP tool={name} erro: {err_msg}", "mcp")
             return {"ok": False, "text": err_msg, "data": None}
 
     result = data.get("result", {})
@@ -698,7 +710,14 @@ async def _mcp_tool(name: str, arguments: dict, timeout: int = 90) -> dict:
     except Exception:
         pass
 
+    # Loga erros retornados pelo MCP no campo "error" do JSON
+    if isinstance(parsed, dict) and parsed.get("error"):
+        log_event("warn", f"MCP tool={name} retornou erro: {parsed['error']}", "mcp")
+    elif name == "source_add" and isinstance(parsed, dict) and parsed.get("status") != "error":
+        log_event("ok", f"source_add bem-sucedido", "mcp")
+
     return {"ok": True, "text": text, "data": parsed}
+
 
 
 @app.get("/api/mcp-status")
@@ -1299,17 +1318,24 @@ async def _raiox_sync_loop():
     """Background loop que roda sync a cada RAIOX_SYNC_INTERVAL segundos."""
     # Aguardar MCP inicializar
     await asyncio.sleep(15)
+    log_event("info", "Loop de sync iniciado", "sync")
     while True:
         if not _raiox_sync_state["running"]:
             _raiox_sync_state["running"] = True
+            log_event("info", "Iniciando rodada de sync...", "sync")
             try:
                 stats = await _sync_raiox_once()
                 _raiox_sync_state["last_sync"] = datetime.now().isoformat()
                 _raiox_sync_state["total_synced"] += stats.get("added", 0)
                 _raiox_sync_state["last_error"] = stats["errors"][0] if stats["errors"] else None
                 _raiox_sync_state["forms_found"] = stats.get("forms", 0)
+                if stats["errors"]:
+                    log_event("error", f"Sync concluído com erros: {stats['errors']}", "sync")
+                else:
+                    log_event("ok", f"Sync OK — {stats.get('added', 0)} novos, {stats.get('forms', 0)} funis", "sync")
             except Exception as e:
                 _raiox_sync_state["last_error"] = str(e)[:200]
+                log_event("error", f"Exceção no sync: {e}", "sync")
             finally:
                 _raiox_sync_state["running"] = False
         await asyncio.sleep(RAIOX_SYNC_INTERVAL)
@@ -1334,6 +1360,88 @@ async def raiox_status():
         "last_error": _raiox_sync_state["last_error"],
         "sync_interval_seconds": RAIOX_SYNC_INTERVAL,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOG BUFFER  — captura eventos importantes em memória e serve via SSE
+# ══════════════════════════════════════════════════════════════════════════════
+
+import collections as _collections
+
+_LOG_BUFFER: _collections.deque = _collections.deque(maxlen=500)
+_log_subscribers: list = []   # asyncio.Queue per connected client
+
+
+def log_event(level: str, msg: str, source: str = "system") -> None:
+    """Registra um evento no buffer de log e notifica clientes SSE."""
+    entry = {
+        "ts": datetime.now().strftime("%H:%M:%S"),
+        "level": level,   # info | ok | warn | error | debug
+        "source": source,
+        "msg": msg,
+    }
+    _LOG_BUFFER.append(entry)
+    # Notifica todos subscribers (fire-and-forget, não bloqueia)
+    dead = []
+    for q in _log_subscribers:
+        try:
+            q.put_nowait(entry)
+        except Exception:
+            dead.append(q)
+    for q in dead:
+        try:
+            _log_subscribers.remove(q)
+        except ValueError:
+            pass
+
+
+@app.get("/api/logs/stream")
+async def logs_stream():
+    """SSE endpoint — envia eventos de log em tempo real para o browser."""
+    from fastapi.responses import StreamingResponse as _SR
+
+    q: asyncio.Queue = asyncio.Queue()
+    _log_subscribers.append(q)
+
+    async def generate():
+        # Envia histórico imediato (últimas 200 entradas)
+        for entry in list(_LOG_BUFFER)[-200:]:
+            payload = json.dumps(entry, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+
+        # Streaming em tempo real
+        try:
+            while True:
+                try:
+                    entry = await asyncio.wait_for(q.get(), timeout=30)
+                    payload = json.dumps(entry, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                _log_subscribers.remove(q)
+            except ValueError:
+                pass
+
+    return _SR(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # desativa buffer do Nginx/Traefik
+        },
+    )
+
+
+@app.get("/api/logs/snapshot")
+async def logs_snapshot():
+    """Retorna snapshot JSON dos últimos 200 eventos (para copiar/colar)."""
+    return {"logs": list(_LOG_BUFFER)[-200:]}
+
+
 
 
 @app.post("/api/raiox-sync-now")

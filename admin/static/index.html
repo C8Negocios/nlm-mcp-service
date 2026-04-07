@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NLM Auth Manager · C8Club</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -20,6 +20,7 @@
       --amber:     #f59e0b;
       --amber-dim: rgba(245,158,11,0.1);
       --red:       #ef4444;
+      --purple:    #a855f7;
       --text:      #e2e8f0;
       --muted:     #64748b;
       --radius:    12px;
@@ -32,7 +33,7 @@
       min-height: 100vh;
     }
 
-    /* ── Header ─────────────────────────────────────────────── */
+    /* ── Header ─────────────────────────────────────────────────────────────── */
     .header {
       background: linear-gradient(135deg, #1e3a8a 0%, #4c1d95 100%);
       padding: 20px 28px;
@@ -45,29 +46,30 @@
     .header-title { font-size: 18px; font-weight: 700; color: #fff; }
     .header-sub { font-size: 12px; color: rgba(255,255,255,0.55); margin-top: 2px; }
 
-    /* ── Layout ──────────────────────────────────────────────── */
+    /* ── Layout ─────────────────────────────────────────────────────────────── */
     .layout {
       display: grid;
-      grid-template-columns: 360px 1fr;
+      grid-template-columns: 340px 1fr;
       gap: 0;
       min-height: calc(100vh - 76px);
     }
 
-    /* ── Sidebar ─────────────────────────────────────────────── */
+    /* ── Sidebar ─────────────────────────────────────────────────────────────── */
     .sidebar {
       background: var(--surface);
       border-right: 1px solid var(--border);
-      padding: 24px;
+      padding: 20px;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 16px;
+      overflow-y: auto;
     }
 
     .card {
       background: rgba(255,255,255,0.03);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 18px;
+      padding: 16px;
     }
 
     .card-title {
@@ -79,7 +81,6 @@
       margin-bottom: 12px;
     }
 
-    /* Status badge */
     .status-row {
       display: flex;
       align-items: center;
@@ -96,23 +97,19 @@
     .badge.no  { background: rgba(239,68,68,0.1); color: var(--red); }
     .badge.run { background: var(--amber-dim); color: var(--amber); animation: pulse 2s infinite; }
 
-    @keyframes pulse {
-      0%,100% { opacity: 1; }
-      50%      { opacity: 0.6; }
-    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
 
-    /* Steps */
-    .steps { display: flex; flex-direction: column; gap: 10px; }
+    .steps { display: flex; flex-direction: column; gap: 8px; }
     .step {
       display: flex;
-      gap: 12px;
+      gap: 10px;
       align-items: flex-start;
-      padding: 12px;
+      padding: 10px;
       border-radius: 8px;
       background: rgba(255,255,255,0.02);
     }
     .step-num {
-      width: 24px; height: 24px;
+      width: 22px; height: 22px;
       border-radius: 50%;
       background: var(--blue-dim);
       border: 1px solid rgba(59,130,246,0.3);
@@ -124,10 +121,9 @@
       justify-content: center;
       flex-shrink: 0;
     }
-    .step-text { font-size: 13px; line-height: 1.5; color: #cbd5e1; }
+    .step-text { font-size: 12px; line-height: 1.5; color: #cbd5e1; }
     .step-text strong { color: #fff; }
 
-    /* Secret input */
     .field { display: flex; flex-direction: column; gap: 6px; }
     .field label { font-size: 11px; color: var(--muted); }
     .field input {
@@ -142,13 +138,12 @@
     }
     .field input:focus { border-color: rgba(59,130,246,0.4); }
 
-    /* Buttons */
     .btn {
       width: 100%;
-      padding: 13px;
+      padding: 12px;
       border: none;
       border-radius: 10px;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s;
@@ -168,63 +163,78 @@
       color: #94a3b8;
       border: 1px solid var(--border);
       font-size: 12px;
-      padding: 10px;
+      padding: 9px;
     }
     .btn-secondary:hover { background: rgba(255,255,255,0.1); color: #fff; }
 
-    /* Message bar */
     .msg {
       font-size: 12px;
-      padding: 10px 12px;
+      padding: 9px 11px;
       border-radius: 8px;
       line-height: 1.5;
       display: none;
     }
-    .msg.ok { background: var(--green-dim); color: var(--green); border: 1px solid rgba(16,185,129,0.2); display: block; }
-    .msg.err { background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.2); display: block; }
+    .msg.ok   { background: var(--green-dim); color: var(--green); border: 1px solid rgba(16,185,129,0.2); display: block; }
+    .msg.err  { background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.2); display: block; }
     .msg.info { background: var(--blue-dim); color: #93c5fd; border: 1px solid rgba(59,130,246,0.2); display: block; }
 
-    /* Endpoint badge */
     .endpoint {
-      font-family: monospace;
-      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
       background: rgba(0,0,0,0.3);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 8px 10px;
+      padding: 7px 9px;
       color: #7dd3fc;
       word-break: break-all;
     }
 
-    /* ── Main content (noVNC viewer) ─────────────────────────── */
+    .divider { height: 1px; background: var(--border); }
+
+    /* ── Main (tab area) ─────────────────────────────────────────────────────── */
     .main {
       display: flex;
       flex-direction: column;
       background: #000;
-      position: relative;
     }
-    .vnc-toolbar {
+
+    /* ── Tab bar ─────────────────────────────────────────────────────────────── */
+    .tab-bar {
       background: var(--surface);
       border-bottom: 1px solid var(--border);
-      padding: 10px 20px;
+      display: flex;
+      align-items: stretch;
+      padding: 0 20px;
+      gap: 0;
+    }
+    .tab-btn {
+      padding: 14px 20px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      border: none;
+      border-bottom: 2px solid transparent;
+      background: none;
+      cursor: pointer;
+      transition: all 0.15s;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 7px;
     }
-    .vnc-title {
-      font-size: 13px;
-      font-weight: 600;
-      color: #fff;
-      flex: 1;
+    .tab-btn:hover { color: #fff; }
+    .tab-btn.active { color: #fff; border-bottom-color: var(--blue); }
+    .tab-btn .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--red);
+      display: none;
     }
-    .vnc-hint { font-size: 11px; color: var(--muted); }
-    #vnc-frame {
-      flex: 1;
-      width: 100%;
-      border: none;
-      display: block;
-      min-height: 500px;
-    }
+    .tab-btn.live .dot { display: inline-block; animation: pulse 1s infinite; background: var(--green); }
+
+    /* ── Tab panels ──────────────────────────────────────────────────────────── */
+    .tab-panel { display: none; flex: 1; flex-direction: column; }
+    .tab-panel.active { display: flex; }
+
+    /* VNC panel */
     .vnc-placeholder {
       flex: 1;
       display: flex;
@@ -239,12 +249,153 @@
     .vnc-placeholder .icon { font-size: 48px; opacity: 0.3; }
     .vnc-placeholder h2 { font-size: 18px; color: #475569; }
     .vnc-placeholder p { font-size: 13px; line-height: 1.6; max-width: 400px; }
+    #vnc-frame { flex: 1; width: 100%; border: none; display: none; min-height: 500px; }
 
-    .divider {
-      height: 1px;
-      background: var(--border);
-      margin: 4px 0;
+    /* ── Log panel ────────────────────────────────────────────────────────────── */
+    .log-toolbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
+    .log-toolbar-title { font-size: 13px; font-weight: 600; color: #fff; flex: 1; }
+    .log-conn-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 20px;
+      background: rgba(239,68,68,0.15);
+      color: var(--red);
+    }
+    .log-conn-badge.connected { background: var(--green-dim); color: var(--green); }
+
+    .log-actions { display: flex; gap: 8px; }
+    .log-btn {
+      padding: 5px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.05);
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .log-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    .log-btn.copied { background: var(--green-dim); color: var(--green); border-color: rgba(16,185,129,0.3); }
+
+    #log-output {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      background: #060810;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 10px;
+      padding: 2px 0;
+      border-radius: 4px;
+      animation: fadeIn 0.2s ease;
+    }
+    .log-line:hover { background: rgba(255,255,255,0.03); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+    .log-ts { color: #475569; flex-shrink: 0; }
+    .log-src {
+      flex-shrink: 0;
+      padding: 0 5px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 600;
+      min-width: 80px;
+      text-align: right;
+    }
+    .log-src.sync    { background: rgba(59,130,246,0.12); color: #93c5fd; }
+    .log-src.mcp     { background: rgba(168,85,247,0.12); color: #c4b5fd; }
+    .log-src.confirm-login { background: rgba(16,185,129,0.12); color: #6ee7b7; }
+    .log-src.system  { background: rgba(148,163,184,0.1);  color: #94a3b8; }
+
+    .log-msg { flex: 1; }
+    .log-line.info  .log-msg { color: #cbd5e1; }
+    .log-line.ok    .log-msg { color: #34d399; }
+    .log-line.warn  .log-msg { color: #fbbf24; }
+    .log-line.error .log-msg { color: #f87171; }
+    .log-line.debug .log-msg { color: #64748b; }
+
+    #log-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      height: 100%;
+      color: var(--muted);
+      font-family: 'Inter', sans-serif;
+    }
+    #log-empty .icon { font-size: 40px; opacity: 0.3; }
+
+    /* ── Debug panel ──────────────────────────────────────────────────────────── */
+    .debug-panel {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .debug-section {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .debug-section-title {
+      padding: 10px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    pre.debug-json {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11.5px;
+      color: #94a3b8;
+      padding: 14px;
+      overflow-x: auto;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .debug-refresh-btn {
+      margin-left: auto;
+      padding: 3px 10px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.05);
+      color: #94a3b8;
+      font-size: 10px;
+      cursor: pointer;
+    }
+    .debug-refresh-btn:hover { color: #fff; background: rgba(255,255,255,0.1); }
+
+    /* field highlights in JSON */
+    .json-key   { color: #7dd3fc; }
+    .json-str   { color: #86efac; }
+    .json-num   { color: #fcd34d; }
+    .json-bool  { color: #f9a8d4; }
+    .json-null  { color: #94a3b8; font-style: italic; }
   </style>
 </head>
 <body>
@@ -259,10 +410,9 @@
 
 <div class="layout">
 
-  <!-- ── Sidebar ──────────────────────────────────────────────── -->
+  <!-- ── Sidebar ──────────────────────────────────────────────────────── -->
   <aside class="sidebar">
 
-    <!-- Status -->
     <div class="card">
       <div class="card-title">Status do Sistema</div>
       <div class="status-row">
@@ -272,7 +422,6 @@
       <div id="status-detail" style="font-size:11px;color:var(--muted);margin-top:8px;display:none;"></div>
     </div>
 
-    <!-- How to auth -->
     <div class="card">
       <div class="card-title">Como autenticar</div>
       <div class="steps">
@@ -291,13 +440,12 @@
       </div>
     </div>
 
-    <!-- Secret + action -->
     <div class="card">
       <div class="field">
         <label for="secret">Chave de acesso</label>
         <input type="password" id="secret" placeholder="Digite a chave..." autocomplete="current-password" />
       </div>
-      <div style="height:14px"></div>
+      <div style="height:12px"></div>
       <button class="btn btn-primary" id="loginBtn" onclick="startLogin()">
         🖥️ Iniciar Login no Servidor
       </button>
@@ -311,7 +459,6 @@
 
     <div class="divider"></div>
 
-    <!-- Endpoint info -->
     <div class="card">
       <div class="card-title">Endpoint MCP (interno)</div>
       <div class="endpoint">http://nlm-service:8080</div>
@@ -322,7 +469,6 @@
 
     <div class="divider"></div>
 
-    <!-- RaioX Sync Status -->
     <div class="card">
       <div class="card-title">📊 Sync RaioX Cultural</div>
       <div id="sync-badge" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue);margin-bottom:12px;">
@@ -333,7 +479,7 @@
         <div>Leads sincronizados: <strong id="sync-count">—</strong></div>
         <div>Funis ativos: <strong id="sync-forms">—</strong></div>
         <div>Última sync: <strong id="sync-last">—</strong></div>
-        <div id="sync-error-row" style="display:none;color:var(--red);font-size:11px;" id="sync-error-text"></div>
+        <div id="sync-error-row" style="display:none;color:var(--red);font-size:11px;"></div>
       </div>
       <div style="height:12px"></div>
       <button class="btn btn-secondary" id="syncNowBtn" onclick="syncNow()" style="font-size:12px;padding:8px 14px;">
@@ -344,42 +490,106 @@
   </aside>
 
 
-  <!-- ── Main — noVNC viewer ──────────────────────────────────── -->
+  <!-- ── Main ─────────────────────────────────────────────────────────── -->
   <main class="main">
-    <div class="vnc-toolbar">
-      <span class="vnc-title">🖥️ Browser do Servidor</span>
-      <span class="vnc-hint" id="vnc-hint">Clique "Iniciar Login" para ativar</span>
+
+    <!-- Tab bar -->
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-vnc-btn" onclick="switchTab('vnc')">
+        🖥️ Browser do Servidor
+      </button>
+      <button class="tab-btn live" id="tab-logs-btn" onclick="switchTab('logs')">
+        <span class="dot"></span>
+        📋 Logs em Tempo Real
+      </button>
+      <button class="tab-btn" id="tab-debug-btn" onclick="switchTab('debug')">
+        🔍 Diagnóstico
+      </button>
     </div>
 
-    <div class="vnc-placeholder" id="vnc-placeholder">
-      <div class="icon">🌐</div>
-      <h2>Browser do Servidor</h2>
-      <p>Quando clicar em <strong>"Iniciar Login no Servidor"</strong>, o Chromium abrirá aqui, rodando diretamente no servidor.<br><br>
-      Faça login com a conta Google do C8Club normalmente — os cookies ficam no servidor, onde as chamadas à API do NotebookLM são feitas.</p>
+    <!-- VNC Tab -->
+    <div class="tab-panel active" id="tab-vnc">
+      <div class="vnc-placeholder" id="vnc-placeholder">
+        <div class="icon">🌐</div>
+        <h2>Browser do Servidor</h2>
+        <p>Quando clicar em <strong>"Iniciar Login no Servidor"</strong>, o Chromium abrirá aqui, rodando diretamente no servidor.<br><br>
+        Faça login com a conta Google do C8Club normalmente — os cookies ficam no servidor, onde as chamadas à API do NotebookLM são feitas.</p>
+      </div>
+      <iframe id="vnc-frame" src=""></iframe>
     </div>
 
-    <iframe id="vnc-frame" src="" style="display:none;"></iframe>
+    <!-- Logs Tab -->
+    <div class="tab-panel" id="tab-logs">
+      <div class="log-toolbar">
+        <span class="log-toolbar-title">📋 Log do Sistema</span>
+        <span class="log-conn-badge" id="log-conn-badge">Desconectado</span>
+        <div class="log-actions">
+          <button class="log-btn" onclick="clearLog()">🗑 Limpar</button>
+          <button class="log-btn" id="copy-btn" onclick="copyLogs()">📋 Copiar</button>
+        </div>
+      </div>
+      <div id="log-output">
+        <div id="log-empty">
+          <div class="icon">📋</div>
+          <div>Conectando ao stream de logs...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Debug Tab -->
+    <div class="tab-panel" id="tab-debug">
+      <div class="debug-panel">
+
+        <div class="debug-section">
+          <div class="debug-section-title">
+            🔑 Auth / metadata.json
+            <button class="debug-refresh-btn" onclick="refreshDebug()">↻ Atualizar</button>
+          </div>
+          <pre class="debug-json" id="debug-auth">Carregando...</pre>
+        </div>
+
+        <div class="debug-section">
+          <div class="debug-section-title">🔌 MCP Status</div>
+          <pre class="debug-json" id="debug-mcp">Carregando...</pre>
+        </div>
+
+        <div class="debug-section">
+          <div class="debug-section-title">
+            📊 Sync Status
+          </div>
+          <pre class="debug-json" id="debug-sync">Carregando...</pre>
+        </div>
+
+      </div>
+    </div>
+
   </main>
 
 </div>
 
 <script>
   const SECRET_KEY = 'nlm_admin_secret';
-
-  // Load saved secret
   const saved = sessionStorage.getItem(SECRET_KEY);
   if (saved) document.getElementById('secret').value = saved;
   document.getElementById('secret').addEventListener('input', e => {
     if (e.target.value) sessionStorage.setItem(SECRET_KEY, e.target.value);
   });
 
-  // Status polling
+  // ── Tab Switching ─────────────────────────────────────────────────────────
+  function switchTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(`tab-${tab}-btn`).classList.add('active');
+    document.getElementById(`tab-${tab}`).classList.add('active');
+    if (tab === 'debug') refreshDebug();
+  }
+
+  // ── Status polling ─────────────────────────────────────────────────────────
   async function checkStatus() {
     try {
       const d = await (await fetch('/api/status', { cache: 'no-store' })).json();
       const badge = document.getElementById('badge');
       const detail = document.getElementById('status-detail');
-
       if (d.login_running) {
         badge.className = 'badge run';
         badge.textContent = 'Login em andamento...';
@@ -390,27 +600,21 @@
         badge.className = 'badge no';
         badge.textContent = 'Não Autenticado';
       }
-
       if (d.profile_exists) {
         detail.style.display = 'block';
         detail.textContent = 'Perfil de browser do servidor ativo.';
       }
-    } catch { }
+    } catch {}
   }
-
   checkStatus();
   setInterval(checkStatus, 5000);
 
+  // ── Login ─────────────────────────────────────────────────────────────────
   async function startLogin() {
     const secret = document.getElementById('secret').value.trim();
     const btn = document.getElementById('loginBtn');
     const msg = document.getElementById('msg');
-
-    if (!secret) {
-      msg.className = 'msg err';
-      msg.textContent = 'Digite a chave de acesso primeiro.';
-      return;
-    }
+    if (!secret) { msg.className = 'msg err'; msg.textContent = 'Digite a chave de acesso primeiro.'; return; }
 
     btn.disabled = true;
     btn.textContent = '⏳ Iniciando...';
@@ -423,22 +627,17 @@
         body: JSON.stringify({ secret })
       });
       const d = await r.json();
-
       if (r.ok) {
         msg.className = 'msg info';
         msg.textContent = d.message;
-
-        // Show noVNC iframe — served by the admin itself at /novnc/
         document.getElementById('vnc-placeholder').style.display = 'none';
         const frame = document.getElementById('vnc-frame');
         frame.style.display = 'block';
-        // noVNC files served at /novnc by FastAPI; WebSocket proxied at /ws-vnc
-        const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-        const vncPath = `${wsProto}://${location.host}/ws-vnc`;
         frame.src = `/novnc/vnc.html?autoconnect=true&resize=scale&show_dot=false&path=ws-vnc&encrypt=${location.protocol === 'https:'}`;
-        document.getElementById('vnc-hint').textContent = 'Faça login no Google na aba que abriu';
+        document.getElementById('vnc-hint-text') && (document.getElementById('vnc-hint-text').textContent = 'Faça login no Google na aba que abriu');
         document.getElementById('badge').className = 'badge run';
         document.getElementById('badge').textContent = 'Login em andamento...';
+        switchTab('vnc');
       } else {
         msg.className = 'msg err';
         msg.textContent = d.message || 'Erro ao iniciar login.';
@@ -456,12 +655,7 @@
     const secret = document.getElementById('secret').value.trim();
     const btn = document.getElementById('checkBtn');
     const msg = document.getElementById('msg');
-
-    if (!secret) {
-      msg.className = 'msg err';
-      msg.textContent = 'Digite a chave de acesso primeiro.';
-      return;
-    }
+    if (!secret) { msg.className = 'msg err'; msg.textContent = 'Digite a chave de acesso primeiro.'; return; }
 
     btn.disabled = true;
     btn.textContent = '⏳ Extraindo cookies do Chrome...';
@@ -475,7 +669,6 @@
         body: JSON.stringify({ secret })
       });
       const d = await r.json();
-
       if (r.ok && d.success) {
         msg.className = 'msg ok';
         msg.textContent = `✅ ${d.message}`;
@@ -483,9 +676,11 @@
         document.getElementById('badge').textContent = 'Autenticado ✓';
         document.getElementById('vnc-frame').style.display = 'none';
         document.getElementById('vnc-placeholder').style.display = 'flex';
+        // Mostra logs automaticamente
+        switchTab('logs');
       } else {
         msg.className = 'msg err';
-        msg.textContent = `❌ ${d.message || 'Erro ao confirmar login. Certifique-se de estar logado no Chrome ao lado.'}`;
+        msg.textContent = `❌ ${d.message || 'Erro ao confirmar login.'}`;
       }
     } catch (e) {
       msg.className = 'msg err';
@@ -496,32 +691,27 @@
     }
   }
 
-  // ── RaioX Sync ─────────────────────────────────────────────
+  // ── Sync status ───────────────────────────────────────────────────────────
   async function checkSyncStatus() {
     try {
       const d = await (await fetch('/api/raiox-status', { cache: 'no-store' })).json();
       const dot = document.getElementById('sync-dot');
       const txt = document.getElementById('sync-status-text');
       const badge = document.getElementById('sync-badge');
+      const errRow = document.getElementById('sync-error-row');
 
       if (d.running) {
-        dot.style.background = 'var(--amber)';
-        badge.style.background = 'var(--amber-dim)';
-        badge.style.color = 'var(--amber)';
+        dot.style.background = 'var(--amber)'; badge.style.background = 'var(--amber-dim)'; badge.style.color = 'var(--amber)';
         txt.textContent = 'Sincronizando...';
       } else if (d.last_error) {
-        dot.style.background = 'var(--red)';
-        badge.style.background = 'rgba(239,68,68,0.1)';
-        badge.style.color = 'var(--red)';
+        dot.style.background = 'var(--red)'; badge.style.background = 'rgba(239,68,68,0.1)'; badge.style.color = 'var(--red)';
         txt.textContent = 'Erro no sync';
-        const errRow = document.getElementById('sync-error-row');
         errRow.style.display = 'block';
-        errRow.textContent = '⚠ ' + d.last_error.substring(0, 80);
+        errRow.textContent = '⚠ ' + d.last_error.substring(0, 100);
       } else if (d.last_sync) {
-        dot.style.background = 'var(--green)';
-        badge.style.background = 'var(--green-dim)';
-        badge.style.color = 'var(--green)';
+        dot.style.background = 'var(--green)'; badge.style.background = 'var(--green-dim)'; badge.style.color = 'var(--green)';
         txt.textContent = 'Sincronizado ✓';
+        errRow.style.display = 'none';
       } else {
         txt.textContent = 'Aguardando...';
       }
@@ -529,10 +719,9 @@
       document.getElementById('sync-count').textContent = d.synced_total ?? '—';
       document.getElementById('sync-forms').textContent = d.forms_found ? `${d.forms_found} funis` : '—';
       if (d.last_sync) {
-        const dt = new Date(d.last_sync);
-        document.getElementById('sync-last').textContent = dt.toLocaleTimeString('pt-BR');
+        document.getElementById('sync-last').textContent = new Date(d.last_sync).toLocaleTimeString('pt-BR');
       }
-    } catch { }
+    } catch {}
   }
 
   async function syncNow() {
@@ -550,15 +739,132 @@
       const d = await r.json();
       btn.textContent = d.ok ? '✅ Sync iniciado!' : '❌ ' + d.message;
       setTimeout(() => checkSyncStatus(), 2000);
-    } catch (e) {
-      btn.textContent = '❌ Erro';
-    } finally {
-      setTimeout(() => { btn.disabled = false; btn.textContent = '🔄 Sincronizar Agora'; }, 3000);
-    }
+    } catch { btn.textContent = '❌ Erro'; }
+    finally { setTimeout(() => { btn.disabled = false; btn.textContent = '🔄 Sincronizar Agora'; }, 3000); }
   }
 
   checkSyncStatus();
   setInterval(checkSyncStatus, 10000);
+
+  // ── SSE Log Stream ────────────────────────────────────────────────────────
+  let _logEntries = [];
+  let _sse = null;
+  let _autoScroll = true;
+
+  function startLogStream() {
+    if (_sse) _sse.close();
+    _sse = new EventSource('/api/logs/stream');
+
+    _sse.onopen = () => {
+      document.getElementById('log-conn-badge').textContent = 'Conectado';
+      document.getElementById('log-conn-badge').className = 'log-conn-badge connected';
+      document.getElementById('tab-logs-btn').classList.add('live');
+    };
+
+    _sse.onmessage = (e) => {
+      try {
+        const entry = JSON.parse(e.data);
+        _logEntries.push(entry);
+        appendLogLine(entry);
+        // Remove empty state
+        const empty = document.getElementById('log-empty');
+        if (empty) empty.remove();
+      } catch {}
+    };
+
+    _sse.onerror = () => {
+      document.getElementById('log-conn-badge').textContent = 'Reconectando...';
+      document.getElementById('log-conn-badge').className = 'log-conn-badge';
+      setTimeout(startLogStream, 3000);
+    };
+
+    // Auto-scroll detection
+    const out = document.getElementById('log-output');
+    out.addEventListener('scroll', () => {
+      _autoScroll = out.scrollTop + out.clientHeight >= out.scrollHeight - 50;
+    });
+  }
+
+  function appendLogLine(entry) {
+    const out = document.getElementById('log-output');
+    const line = document.createElement('div');
+    line.className = `log-line ${entry.level || 'info'}`;
+
+    const srcClass = (entry.source || 'system').replace(/[^a-z\-]/g, '');
+    line.innerHTML = `
+      <span class="log-ts">${entry.ts || ''}</span>
+      <span class="log-src ${srcClass}">${entry.source || 'system'}</span>
+      <span class="log-msg">${escHtml(entry.msg || '')}</span>
+    `;
+    out.appendChild(line);
+
+    if (_autoScroll) out.scrollTop = out.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function clearLog() {
+    const out = document.getElementById('log-output');
+    _logEntries = [];
+    out.innerHTML = '';
+  }
+
+  async function copyLogs() {
+    const btn = document.getElementById('copy-btn');
+    // Fetch full snapshot
+    try {
+      const snap = await (await fetch('/api/logs/snapshot')).json();
+      const text = snap.logs.map(e => `[${e.ts}] [${e.level.toUpperCase()}] [${e.source}] ${e.msg}`).join('\n');
+      await navigator.clipboard.writeText(text);
+      btn.textContent = '✅ Copiado!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = '📋 Copiar'; btn.classList.remove('copied'); }, 2000);
+    } catch {
+      btn.textContent = '❌ Erro';
+      setTimeout(() => { btn.textContent = '📋 Copiar'; }, 2000);
+    }
+  }
+
+  startLogStream();
+
+  // ── Debug panel ───────────────────────────────────────────────────────────
+  function colorizeJson(obj) {
+    const s = JSON.stringify(obj, null, 2);
+    return s
+      .replace(/(".*?"):/g, '<span class="json-key">$1</span>:')
+      .replace(/: (".*?")/g, ': <span class="json-str">$1</span>')
+      .replace(/: (true|false)/g, ': <span class="json-bool">$1</span>')
+      .replace(/: (null)/g, ': <span class="json-null">$1</span>')
+      .replace(/: (-?\d+\.?\d*)/g, ': <span class="json-num">$1</span>');
+  }
+
+  async function refreshDebug() {
+    // Auth debug
+    try {
+      const d = await (await fetch('/api/auth-debug', { cache: 'no-store' })).json();
+      document.getElementById('debug-auth').innerHTML = colorizeJson(d);
+    } catch (e) {
+      document.getElementById('debug-auth').textContent = 'Erro: ' + e.message;
+    }
+
+    // MCP status
+    try {
+      const d = await (await fetch('/api/mcp-status', { cache: 'no-store' })).json();
+      document.getElementById('debug-mcp').innerHTML = colorizeJson(d);
+    } catch (e) {
+      document.getElementById('debug-mcp').textContent = 'Erro: ' + e.message;
+    }
+
+    // Sync status
+    try {
+      const d = await (await fetch('/api/raiox-status', { cache: 'no-store' })).json();
+      document.getElementById('debug-sync').innerHTML = colorizeJson(d);
+    } catch (e) {
+      document.getElementById('debug-sync').textContent = 'Erro: ' + e.message;
+    }
+  }
 </script>
 
 </body>
