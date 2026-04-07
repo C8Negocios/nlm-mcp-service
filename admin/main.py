@@ -167,7 +167,174 @@ def _restart_mcp() -> bool:
         return False
 
 
-# ── Status ─────────────────────────────────────────────────────────────────────
+# ── Direct NotebookLM API (bypassa MCP — necessário pois MCP não envia SAPISIDHASH) ──────────────
+
+import hashlib as _hashlib
+
+def _make_sapisidhash(sapisid: str, origin: str = "https://notebooklm.google.com") -> str:
+    """Gera o header Authorization: SAPISIDHASH exigido pelo batchexecute do Google."""
+    ts = str(int(time.time()))
+    raw = f"{ts} {sapisid} {origin}"
+    sha1 = _hashlib.sha1(raw.encode()).hexdigest()
+    return f"SAPISIDHASH {ts}_{sha1}"
+
+
+def _load_nlm_cookies() -> tuple[dict, str]:
+    """
+    Retorna (cookie_dict, sapisid) lendo do profiles/default/cookies.json.
+    """
+    profile_dir = COOKIES_DIR / "profiles" / "default"
+    raw = json.loads((profile_dir / "cookies.json").read_text())
+    cookie_dict = {}
+    sapisid = ""
+    for ck in raw:
+        name = ck.get("name", "")
+        value = ck.get("value", "")
+        if name:
+            cookie_dict[name] = value
+        if name == "SAPISID":
+            sapisid = value
+    return cookie_dict, sapisid
+
+
+async def _direct_add_text_source(
+    notebook_id: str,
+    text: str,
+    title: str = "Pasted Text",
+) -> dict:
+    """
+    Adiciona uma fonte de texto no NotebookLM via batchexecute DIRETO
+    (sem usar a lib MCP que não envia o SAPISIDHASH Authorization header).
+
+    Formato extraído do código-fonte do notebooklm-mcp-cli (sources.py):
+      source_data = [None, [title, text], None, 2, None, ..., 1]
+      params = [[source_data], notebook_id, [2], [1, None, ..., [1]]]
+      RPC ID: izAoDd
+    """
+    import urllib.parse as _urlparse
+
+    origin = "https://notebooklm.google.com"
+    bl = _auth.get("build_label") or os.environ.get("NOTEBOOKLM_BL", "boq_labs-tailwind-frontend_20260405.03_p0")
+
+    # Carregar cookies e metadados
+    try:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+        meta = json.loads((profile_dir / "metadata.json").read_text())
+        csrf_token = meta.get("csrf_token", "")
+        cookie_dict, sapisid = _load_nlm_cookies()
+    except Exception as e:
+        return {"ok": False, "error": f"Leitura de credenciais falhou: {e}"}
+
+    if not sapisid:
+        return {"ok": False, "error": "Cookie SAPISID não encontrado"}
+
+    # Construir params conforme sources.py:add_text_source
+    source_data = [None, [title, text], None, 2, None, None, None, None, None, None, 1]
+    params = [
+        [source_data],
+        notebook_id,
+        [2],
+        [1, None, None, None, None, None, None, None, None, None, [1]],
+    ]
+
+    # Serializar f.req (igual ao _build_request_body do BaseClient)
+    params_json = json.dumps(params, separators=(",", ":"), ensure_ascii=False)
+    f_req_inner = [[["izAoDd", params_json, None, "generic"]]]
+    f_req_json = json.dumps(f_req_inner, separators=(",", ":"), ensure_ascii=False)
+    body_parts = [f"f.req={_urlparse.quote(f_req_json, safe='')}"]
+    if csrf_token:
+        body_parts.append(f"at={_urlparse.quote(csrf_token, safe='')}")
+    body = "&".join(body_parts) + "&"
+
+    # URL de destino (mesma lógica do _build_url)
+    source_path = f"/notebook/{notebook_id}"
+    qp = _urlparse.urlencode({
+        "rpcids": "izAoDd",
+        "source-path": source_path,
+        "bl": bl,
+        "hl": "en",
+        "rt": "c",
+    })
+    url = f"{origin}/_/LabsTailwindUi/data/batchexecute?{qp}"
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "Authorization": _make_sapisidhash(sapisid, origin),
+        "X-Same-Domain": "1",
+        "X-Goog-AuthUser": "0",
+        "Origin": origin,
+        "Referer": f"{origin}/",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as cl:
+            resp = await cl.post(url, content=body, cookies=cookie_dict, headers=headers)
+
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+        # Parsear resposta (mesmo formato do _parse_response)
+        text_body = resp.text
+        if text_body.startswith(")]}'"):
+            text_body = text_body[4:]
+        lines = text_body.strip().split("\n")
+        results = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
+                continue
+            try:
+                int(line)
+                i += 1
+                if i < len(lines):
+                    try:
+                        data = json.loads(lines[i])
+                        results.append(data)
+                    except Exception:
+                        pass
+                i += 1
+            except ValueError:
+                try:
+                    results.append(json.loads(line))
+                except Exception:
+                    pass
+                i += 1
+
+        # Extrair source_id da resposta wrb.fr
+        source_id = None
+        source_title = title
+        for chunk in results:
+            if isinstance(chunk, list):
+                for item in chunk:
+                    if isinstance(item, list) and len(item) >= 3 and item[0] == "wrb.fr" and item[1] == "izAoDd":
+                        # Verificar erro estrutural (item[5])
+                        if len(item) > 5 and isinstance(item[5], list) and item[5]:
+                            err_code = item[5][0] if isinstance(item[5][0], int) else None
+                            return {"ok": False, "error": f"RPC error code {err_code}"}
+                        result_str = item[2]
+                        if isinstance(result_str, str):
+                            try:
+                                inner = json.loads(result_str)
+                                # inner[0][0] = [[source_id], title, ...]
+                                if inner and isinstance(inner[0], list) and inner[0]:
+                                    sd = inner[0][0]
+                                    source_id = sd[0][0] if sd[0] else None
+                                    source_title = sd[1] if len(sd) > 1 else title
+                            except Exception:
+                                pass
+
+        if source_id:
+            return {"ok": True, "source_id": source_id, "title": source_title}
+        else:
+            return {"ok": False, "error": "Source ID não encontrado na resposta", "raw": resp.text[:300]}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 
 @app.get("/api/status")
 async def get_status():
@@ -1332,65 +1499,24 @@ async def _sync_raiox_once() -> dict:
             title = _get_submission_title(response, field_map)
             content = _format_response_as_markdown(response, field_map, form_title)
 
-            # Adicionar ao notebook via MCP
-            result = await _mcp_tool("source_add", {
-                "notebook_id": RAIOX_NOTEBOOK_ID,
-                "source_type": "text",
-                "title": title[:200],
-                "text": content,
-                "wait": True,
-            }, timeout=120)
-
-            result_text = result.get("text", "")
-            result_data = result.get("data") or {}
-            result_error = ""
-            if isinstance(result_data, dict):
-                result_error = result_data.get("error", "")
-            elif not result["ok"]:
-                result_error = result_text
-
-            logger.debug(
-                f"[raiox-sync] source_add '{title[:30]}': ok={result['ok']} "
-                f"text={result_text[:120]!r}"
+            # Adicionar ao notebook DIRETAMENTE (bypassa MCP — MCP não envia SAPISIDHASH)
+            result = await _direct_add_text_source(
+                notebook_id=RAIOX_NOTEBOOK_ID,
+                text=content,
+                title=title[:200],
             )
 
-            # Auth expirado → abortar sync
-            is_auth_error = (
-                "authentication expired" in result_text.lower()
-                or "authentication expired" in result_error.lower()
-                or "run `nlm login`" in result_text.lower()
-            )
-            if is_auth_error:
-                errors.append(f"AUTH_EXPIRED: {result_error[:100] or result_text[:100]}")
-                _save_sync_state({"synced_ids": list(synced_ids)})
-                return {"added": added, "errors": errors, "forms": len(forms),
-                        "total_synced": len(synced_ids), "auth_error": True}
+            log_event("mcp", f"direct_source_add '{title[:30]}': ok={result.get('ok')} sid={result.get('source_id', '')[:20] or result.get('error', '')[:60]}", "sync")
 
-            # ── Lógica de sucesso corrigida ────────────────────────────────────
-            # result["ok"] = True significa que o MCP respondeu sem erro JSON-RPC.
-            # O campo "status" pode estar ausente — isso NÃO é erro.
-            # Considera erro apenas quando:
-            #   - result["ok"] é False (erro JSON-RPC / MCP não respondeu), OU
-            #   - result_data contém campo "error" explícito com valor não vazio, OU
-            #   - result_text contém mensagem de erro conhecida
-            is_hard_error = not result["ok"]
-            has_explicit_error = bool(result_error)
-            has_text_error = (
-                "could not add" in result_text.lower()
-                or "failed to add" in result_text.lower()
-                or "error" in result_text.lower()[:50]
-            ) and not result["ok"]
-
-            if is_hard_error or has_explicit_error or has_text_error:
-                err_msg = result_error or result_text[:120]
-                errors.append(f"{title[:40]}: {err_msg[:80]}")
-                logger.warning(f"[raiox-sync] Falha source_add '{title[:40]}': {err_msg[:120]}")
-            else:
-                # Sucesso: atualiza contagem do notebook alvo
+            if result.get("ok") and result.get("source_id"):
                 synced_ids.add(uid)
                 added += 1
-                prev = _notebook_source_counts.get(target_notebook_id, 0)
-                _notebook_source_counts[target_notebook_id] = prev + 1
+                log_event("sync", f"✅ Adicionado: {title[:50]}", "sync")
+            else:
+                err_msg = result.get("error", "resposta inesperada")
+                errors.append(f"{title[:40]}: {err_msg[:80]}")
+                logger.warning(f"[raiox-sync] Falha source_add '{title[:40]}': {err_msg[:120]}")
+
 
         await asyncio.sleep(1)
 
