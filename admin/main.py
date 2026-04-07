@@ -668,6 +668,123 @@ async def mcp_status():
         return {"mcp_ok": False, "session_id": None, "initialized": False, "detail": str(e)}
 
 
+@app.get("/api/mcp-logs")
+async def mcp_logs():
+    """Retorna as últimas 200 linhas dos logs do processo MCP (debug)."""
+    logs = {}
+    for name, path in [
+        ("mcp_restart", "/tmp/mcp_restart.log"),
+        ("chrome_login", "/tmp/chrome_login.log"),
+    ]:
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+            lines = content.splitlines()
+            logs[name] = lines[-200:]  # últimas 200 linhas
+        except FileNotFoundError:
+            logs[name] = [f"[arquivo não encontrado: {path}]"]
+        except Exception as e:
+            logs[name] = [f"[erro ao ler: {e}]"]
+    return logs
+
+
+@app.post("/api/diagnose-source-add")
+async def diagnose_source_add(body: dict = {}):
+    """
+    Debug completo: testa notebook_list + source_add com conteúdo mínimo.
+    Retorna a resposta RAW do MCP para diagnóstico.
+    """
+    notebook_id = body.get("notebook_id", RAIOX_NOTEBOOK_ID)
+    diag: dict = {"notebook_id": notebook_id, "steps": []}
+
+    # Step 1: MCP session
+    try:
+        _mcp_session["initialized"] = False
+        await _mcp_ensure_session()
+        diag["steps"].append({
+            "step": "mcp_init",
+            "ok": _mcp_session["initialized"],
+            "session_id": _mcp_session["sid"],
+        })
+    except Exception as e:
+        diag["steps"].append({"step": "mcp_init", "ok": False, "error": str(e)})
+        return diag
+
+    # Step 2: refresh_auth
+    try:
+        rr = await _mcp_tool("refresh_auth", {}, timeout=30)
+        diag["steps"].append({
+            "step": "refresh_auth",
+            "ok": rr["ok"],
+            "text": rr["text"][:300],
+            "data": rr["data"],
+        })
+    except Exception as e:
+        diag["steps"].append({"step": "refresh_auth", "ok": False, "error": str(e)})
+
+    # Step 3: notebook_list
+    try:
+        nl = await _mcp_tool("notebook_list", {"max_results": 3}, timeout=30)
+        diag["steps"].append({
+            "step": "notebook_list",
+            "ok": nl["ok"],
+            "text": nl["text"][:400],
+            "data_keys": list(nl["data"].keys()) if isinstance(nl.get("data"), dict) else None,
+            "notebook_count": len(nl["data"].get("notebooks", [])) if isinstance(nl.get("data"), dict) else 0,
+        })
+    except Exception as e:
+        diag["steps"].append({"step": "notebook_list", "ok": False, "error": str(e)})
+
+    # Step 4: source_add com conteúdo mínimo de teste
+    test_title = "TESTE DIAGNOSTICO NLM"
+    test_content = (
+        "# Teste de Diagnostico NotebookLM\n\n"
+        "Este source foi adicionado automaticamente pelo diagnóstico do NLM Admin.\n"
+        "Pode ser removido após confirmar que o sync funciona.\n"
+    )
+    try:
+        _mcp_session["initialized"] = False  # força nova sessão para isolar o teste
+        sa = await _mcp_tool("source_add", {
+            "notebook_id": notebook_id,
+            "source_type": "text",
+            "title": test_title,
+            "text": test_content,
+            "wait": False,  # sem wait para resposta mais rápida
+        }, timeout=60)
+        diag["steps"].append({
+            "step": "source_add_test",
+            "ok": sa["ok"],
+            "text_full": sa["text"],   # resposta completa sem truncar
+            "data": sa["data"],
+        })
+    except Exception as e:
+        diag["steps"].append({"step": "source_add_test", "ok": False, "error": str(e)})
+
+    # Step 5: source_add com wait=True (se o anterior funcionou sem wait)
+    prev_ok = any(s.get("step") == "source_add_test" and s.get("ok") for s in diag["steps"])
+    if prev_ok:
+        diag["steps"].append({"step": "source_add_wait", "skipped": "source_add sem wait já funcionou"})
+    else:
+        try:
+            _mcp_session["initialized"] = False
+            sa2 = await _mcp_tool("source_add", {
+                "notebook_id": notebook_id,
+                "source_type": "text",
+                "title": test_title + " (wait=True)",
+                "text": test_content,
+                "wait": True,
+            }, timeout=120)
+            diag["steps"].append({
+                "step": "source_add_wait",
+                "ok": sa2["ok"],
+                "text_full": sa2["text"],
+                "data": sa2["data"],
+            })
+        except Exception as e:
+            diag["steps"].append({"step": "source_add_wait", "ok": False, "error": str(e)})
+
+    return diag
+
+
 @app.get("/api/notebooks")
 async def list_notebooks():
     """
