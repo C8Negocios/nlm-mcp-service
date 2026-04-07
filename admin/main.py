@@ -975,6 +975,7 @@ async def _discover_cultural_forms() -> list[dict]:
     return [f for f in all_forms if "RAIO-X CULTURAL" in f.get("title", "").upper()]
 
 
+
 async def _sync_raiox_once() -> dict:
     """
     Executa uma rodada completa de sincronização:
@@ -996,18 +997,19 @@ async def _sync_raiox_once() -> dict:
     _raiox_sync_state["forms_found"] = len(forms)
 
     # Refresh auth tokens (CSRF) antes de iniciar o sync
-    # CSRF tokens do Google expiram — obrigatorio chamar antes de cada batch de source_add
     try:
-        await _mcp_tool("refresh_auth", {}, timeout=30)
-        logger.info("[raiox-sync] refresh_auth concluido")
+        refresh_res = await _mcp_tool("refresh_auth", {}, timeout=30)
+        logger.info(f"[raiox-sync] refresh_auth: {refresh_res.get('text', 'ok')[:80]}")
     except Exception as e:
         logger.warning(f"[raiox-sync] refresh_auth falhou (continuando): {e}")
+
+    # Invalidar cache de sessão MCP para esta rodada (CSRF pode ter mudado pós-restart)
+    _mcp_session["initialized"] = False
 
     for form in forms:
         form_id = form["id"]
         form_title = form.get("title", form_id)
 
-        # Buscar mapeamento de campos e respostas
         field_map, resp_data = await asyncio.gather(
             _tf_fetch_form_fields(form_id),
             _tf_fetch_responses(form_id),
@@ -1016,12 +1018,12 @@ async def _sync_raiox_once() -> dict:
         for response in resp_data.get("items", []):
             uid = f"{form_id}::{response.get('response_id', response.get('token', ''))}"
             if uid in synced_ids:
-                continue  # Já sincronizado
+                continue
 
             title = _get_submission_title(response, field_map)
             content = _format_response_as_markdown(response, field_map, form_title)
 
-            # Adicionar ao notebook via MCP — formato Markdown
+            # Adicionar ao notebook via MCP
             result = await _mcp_tool("source_add", {
                 "notebook_id": RAIOX_NOTEBOOK_ID,
                 "source_type": "text",
@@ -1030,48 +1032,59 @@ async def _sync_raiox_once() -> dict:
                 "wait": True,
             }, timeout=120)
 
-            # Verificar resposta do source_add
             result_text = result.get("text", "")
             result_data = result.get("data") or {}
-            result_error = result_data.get("error", "") if isinstance(result_data, dict) else ""
+            result_error = ""
+            if isinstance(result_data, dict):
+                result_error = result_data.get("error", "")
+            elif not result["ok"]:
+                result_error = result_text
 
-            # Auth expirado → abortar sync (MCP precisa de re-login)
+            logger.debug(
+                f"[raiox-sync] source_add '{title[:30]}': ok={result['ok']} "
+                f"text={result_text[:120]!r}"
+            )
+
+            # Auth expirado → abortar sync
             is_auth_error = (
                 "authentication expired" in result_text.lower()
                 or "authentication expired" in result_error.lower()
                 or "run `nlm login`" in result_text.lower()
             )
             if is_auth_error:
-                errors.append(f"AUTH_EXPIRED: {result_error[:100]}")
+                errors.append(f"AUTH_EXPIRED: {result_error[:100] or result_text[:100]}")
                 _save_sync_state({"synced_ids": list(synced_ids)})
                 return {"added": added, "errors": errors, "forms": len(forms),
                         "total_synced": len(synced_ids), "auth_error": True}
 
-            # Sucesso real (status=success ou sem erro)
-            is_success = (
-                result["ok"]
-                and result_data.get("status") not in ("error", None)
-                and not result_error
-            ) or (
-                result["ok"]
-                and "success" in result_text.lower()
-            ) or (
-                result["ok"]
-                and result_data.get("source_id")
-            )
+            # ── Lógica de sucesso corrigida ────────────────────────────────────
+            # result["ok"] = True significa que o MCP respondeu sem erro JSON-RPC.
+            # O campo "status" pode estar ausente — isso NÃO é erro.
+            # Considera erro apenas quando:
+            #   - result["ok"] é False (erro JSON-RPC / MCP não respondeu), OU
+            #   - result_data contém campo "error" explícito com valor não vazio, OU
+            #   - result_text contém mensagem de erro conhecida
+            is_hard_error = not result["ok"]
+            has_explicit_error = bool(result_error)
+            has_text_error = (
+                "could not add" in result_text.lower()
+                or "failed to add" in result_text.lower()
+                or "error" in result_text.lower()[:50]
+            ) and not result["ok"]
 
-            if is_success:
+            if is_hard_error or has_explicit_error or has_text_error:
+                err_msg = result_error or result_text[:120]
+                errors.append(f"{title[:40]}: {err_msg[:80]}")
+                logger.warning(f"[raiox-sync] Falha source_add '{title[:40]}': {err_msg[:120]}")
+            else:
+                # Sucesso: atualiza contagem do notebook alvo
                 synced_ids.add(uid)
                 added += 1
-            else:
-                # Erro de conteúdo — logar e continuar
-                err_msg = result_error or result_text
-                errors.append(f"{title[:40]}: {err_msg[:80]}")
+                prev = _notebook_source_counts.get(target_notebook_id, 0)
+                _notebook_source_counts[target_notebook_id] = prev + 1
 
-        # Breve pausa entre forms para não sobrecarregar MCP
         await asyncio.sleep(1)
 
-    # Persistir state
     state["synced_ids"] = list(synced_ids)
     _save_sync_state(state)
 
