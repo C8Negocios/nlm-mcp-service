@@ -351,55 +351,79 @@ async def confirm_login(body: dict):
     (profile_dir / "cookies.json").write_text(json.dumps(pw, ensure_ascii=False), encoding="utf-8")
     (profile_dir / "cookies.json").chmod(0o600)
     # ── Fetch CSRF token, bl and session_id from NotebookLM page ─────────────
-    # CRITICAL: The auth manager reads csrf_token FROM metadata.json (profile_dir).
-    # We MUST extract the real CSRF BEFORE writing metadata.json.
-    # Without csrf_token, ALL batchexecute calls (source_add, notebook_list) → 400.
+    # Estratégia: tentamos extrair br/csrf, mas MESMO SE FALHAR escrevemos
+    # metadata.json SEM csrf_token → o MCP chamará _refresh_auth_tokens() no
+    # startup e fará o fetch ele mesmo com os cookies frescos. Isso garante que
+    # o bl (cfb2h) sempre vem direto do NotebookLM, não de um regex nosso.
     csrf_token  = ""
     nlm_session = ""
     current_bl  = ""
+    html_status = 0
+    final_url   = ""
     try:
         import re as _re
         cks = httpx.Cookies()
         for ck in pw:
             if ck.get("name") and ck.get("value"):
-                cks.set(ck["name"], ck["value"], domain=ck.get("domain", ".google.com"))
+                # set sem domínio para que o httpx inclua em todas subdomain requests
+                try:
+                    cks.set(ck["name"], ck["value"], domain=ck.get("domain", ".google.com"))
+                except Exception:
+                    pass
 
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as cl:
             nlm_resp = await cl.get(
                 "https://notebooklm.google.com",
                 cookies=cks,
                 headers={
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
                 },
             )
+        html_status = nlm_resp.status_code
+        final_url   = str(nlm_resp.url)
         html = nlm_resp.text
 
         csrf_m = _re.search(r'"SNlM0e":"([^"]+)"', html)
         sid_m  = _re.search(r'"FdrFJe":"([^"]+)"', html)
-        bl_m   = _re.search(r'"cfb2h":"([^"]+)"', html)
-        if not bl_m:
-            bl_m = _re.search(r'boq_labs-tailwind-frontend_[\w.]+', html)
+        # Tenta múltiplos padrões para bl
+        bl_m = (
+            _re.search(r'"cfb2h":"([^"]+)"', html)
+            or _re.search(r'"boq_labs-tailwind-frontend_[\w.]+', html)
+        )
 
         csrf_token  = csrf_m.group(1) if csrf_m else ""
         nlm_session = sid_m.group(1)  if sid_m  else ""
-        current_bl  = bl_m.group(1)   if bl_m   else ""
+        # remove aspas iniciais se veio do segundo padrão
+        current_bl  = (bl_m.group(0).lstrip('"') if bl_m else "")
 
-        logger.info(f"[confirm-login] CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl}")
+        logger.info(
+            f"[confirm-login] status={html_status} url={final_url[:60]} "
+            f"CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl[:40] if current_bl else 'VAZIO'}"
+        )
 
-        # Patch base.py fallback for safety
+        # Patch base.py fallback para garantia extra
         if current_bl:
-            base_py = Path("/usr/local/lib/python3.12/site-packages/notebooklm_tools/core/base.py")
-            if base_py.exists():
-                orig    = base_py.read_text(encoding="utf-8")
-                patched = _re.sub(
-                    r'_BL_FALLBACK\s*=\s*"boq_labs-tailwind-frontend_[^"]+"',
-                    f'_BL_FALLBACK = "{current_bl}"',
-                    orig,
-                )
-                if patched != orig:
-                    base_py.write_text(patched, encoding="utf-8")
+            for py_path in [
+                "/usr/local/lib/python3.12/site-packages/notebooklm_tools/core/base.py",
+                "/usr/local/lib/python3.11/site-packages/notebooklm_tools/core/base.py",
+            ]:
+                base_py = Path(py_path)
+                if base_py.exists():
+                    orig    = base_py.read_text(encoding="utf-8")
+                    patched = _re.sub(
+                        r'_BL_FALLBACK\s*=\s*"boq_labs-tailwind-frontend_[^"]+"',
+                        f'_BL_FALLBACK = "{current_bl}"',
+                        orig,
+                    )
+                    if patched != orig:
+                        base_py.write_text(patched, encoding="utf-8")
+                        logger.info(f"[confirm-login] base.py patchado: {py_path}")
 
         if csrf_token:
             _auth["csrf_ok"] = True
@@ -408,15 +432,24 @@ async def confirm_login(body: dict):
     except Exception as e:
         logger.warning(f"[confirm-login] Falha ao extrair CSRF/bl: {e}")
 
-    # Write profile metadata.json WITH the real CSRF token
-    # The auth manager reads metadata.json → csrf_token to set X-Goog-Csrf-Token
+    # ── ESTRATÉGIA DE METADATA ──────────────────────────────────────────────
+    # Se csrf_token foi extraído COM SUCESSO → salva no metadata.json, MCP usa direto.
+    # Se csrf_token VAZIO (página não carregou ou estrutura mudou) → salva null,
+    # o MCP chamará _refresh_auth_tokens() no startup e extrairá bl+csrf fresco.
+    # Em ambos os casos o MCP terá tokens válidos ao iniciar.
     (profile_dir / "metadata.json").write_text(
         json.dumps({
             "last_validated": datetime.now().isoformat(),
             "email": "arquitetomais@gmail.com",
-            "csrf_token": csrf_token or None,
+            "csrf_token": csrf_token or None,   # null → MCP faz fetch próprio
             "session_id": nlm_session or None,
             "build_label": current_bl or None,
+            "_debug": {
+                "html_status": html_status,
+                "final_url": final_url[:100],
+                "csrf_found": bool(csrf_token),
+                "bl_found": bool(current_bl),
+            },
         }, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -682,6 +715,44 @@ async def mcp_status():
         }
     except Exception as e:
         return {"mcp_ok": False, "session_id": None, "initialized": False, "detail": str(e)}
+
+
+@app.get("/api/auth-debug")
+async def auth_debug():
+    """Expõe metadata.json + env vars para diagnóstico de bl/csrf."""
+    try:
+        from notebooklm_tools.utils.config import get_profile_dir  # type: ignore
+        profile_dir = Path(get_profile_dir("default"))
+    except Exception:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+
+    meta = {}
+    try:
+        raw = (profile_dir / "metadata.json").read_text(encoding="utf-8")
+        meta = json.loads(raw)
+        # Mascarar o csrf_token mas manter comprimento para diagnóstico
+        if meta.get("csrf_token"):
+            t = meta["csrf_token"]
+            meta["csrf_token"] = f"{t[:6]}...{t[-4:]} (len={len(t)})"
+    except Exception as e:
+        meta = {"error": str(e)}
+
+    cookies_count = 0
+    try:
+        raw_ck = (profile_dir / "cookies.json").read_text(encoding="utf-8")
+        cookies_count = len(json.loads(raw_ck))
+    except Exception:
+        pass
+
+    return {
+        "metadata": meta,
+        "cookies_count": cookies_count,
+        "profile_dir": str(profile_dir),
+        "NOTEBOOKLM_BL_env": os.environ.get("NOTEBOOKLM_BL", "(não definido)"),
+        "mcp_session": _mcp_session,
+        "auth_state": {k: v for k, v in _auth.items() if k != "cookies"},
+    }
+
 
 
 @app.get("/api/mcp-logs")
