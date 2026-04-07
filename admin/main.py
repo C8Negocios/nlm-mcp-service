@@ -784,6 +784,81 @@ async def auth_debug():
     }
 
 
+@app.get("/api/raw-batchexecute")
+async def raw_batchexecute():
+    """
+    Faz um batchexecute direto ao NotebookLM SEM passar pelo MCP.
+    Testa se os cookies + CSRF estão funcionando corretamente.
+    Útil para isolar: problema nos cookies vs problema na lib MCP.
+    """
+    import hashlib as _hashlib
+    import time as _time
+
+    try:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+        raw_meta = json.loads((profile_dir / "metadata.json").read_text())
+        csrf_token = raw_meta.get("csrf_token", "")
+        bl = raw_meta.get("build_label", os.environ.get("NOTEBOOKLM_BL", ""))
+
+        raw_cookies = json.loads((profile_dir / "cookies.json").read_text())
+        cookie_dict = {}
+        sapisid = ""
+        for ck in raw_cookies:
+            name = ck.get("name", "")
+            value = ck.get("value", "")
+            cookie_dict[name] = value
+            if name == "SAPISID":
+                sapisid = value
+
+        # Gerar SAPISIDHASH  (obrigatório para batchexecute autenticado)
+        origin = "https://notebooklm.google.com"
+        ts = str(int(_time.time()))
+        raw_hash = f"{ts} {sapisid} {origin}"
+        sha1 = _hashlib.sha1(raw_hash.encode()).hexdigest()
+        sapisidhash = f"SAPISIDHASH {ts}_{sha1}"
+
+        # Payload do notebook_list (rpcids=wXbhsf)
+        f_req = json.dumps([[["wXbhsf", "[[1]]", None, "generic"]]])
+        data = {
+            "f.req": f_req,
+            "at": csrf_token,
+        }
+
+        url = (
+            f"https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute"
+            f"?rpcids=wXbhsf&source-path=%2F&bl={bl}&hl=en&rt=c"
+        )
+
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cl:
+            resp = await cl.post(
+                url,
+                data=data,
+                cookies=cookie_dict,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                    "Authorization": sapisidhash,
+                    "X-Same-Domain": "1",
+                    "X-Goog-AuthUser": "0",
+                    "Origin": origin,
+                    "Referer": "https://notebooklm.google.com/",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                },
+            )
+
+        return {
+            "http_status": resp.status_code,
+            "ok": resp.status_code == 200,
+            "sapisidhash_header": sapisidhash[:40] + "...",
+            "sapisid_found": bool(sapisid),
+            "csrf_len": len(csrf_token),
+            "bl": bl,
+            "cookies_sent": list(cookie_dict.keys()),
+            "response_preview": resp.text[:500] if resp.status_code != 200 else resp.text[:200],
+        }
+
+    except Exception as e:
+        return {"error": str(e), "ok": False}
+
 
 @app.get("/api/mcp-logs")
 async def mcp_logs():
