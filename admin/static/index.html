@@ -553,11 +553,19 @@
           <pre class="debug-json" id="debug-mcp">Carregando...</pre>
         </div>
 
-        <div class="debug-section">
+<div class="debug-section">
           <div class="debug-section-title">
             📊 Sync Status
           </div>
           <pre class="debug-json" id="debug-sync">Carregando...</pre>
+        </div>
+
+        <div class="debug-section">
+          <div class="debug-section-title">
+            🖥️ MCP Process Log (últimas 30 linhas)
+            <button class="debug-refresh-btn" onclick="refreshDebug()">↻ Atualizar</button>
+          </div>
+          <pre class="debug-json" id="debug-mcplogs" style="color:#f87171;font-size:11px;">Carregando...</pre>
         </div>
 
       </div>
@@ -863,6 +871,15 @@
       document.getElementById('debug-sync').innerHTML = colorizeJson(d);
     } catch (e) {
       document.getElementById('debug-sync').textContent = 'Erro: ' + e.message;
+    }
+
+    // MCP process logs
+    try {
+      const d = await (await fetch('/api/mcp-logs', { cache: 'no-store' })).json();
+      const lines = (d.mcp_restart || []).slice(-30);
+      document.getElementById('debug-mcplogs').textContent = lines.join('\n') || '(vazio)';
+    } catch (e) {
+      document.getElementById('debug-mcplogs').textContent = 'Erro: ' + e.message;
     }
   }
 </script>

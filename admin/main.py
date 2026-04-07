@@ -391,24 +391,33 @@ async def confirm_login(body: dict):
 
         csrf_m = _re.search(r'"SNlM0e":"([^"]+)"', html)
         sid_m  = _re.search(r'"FdrFJe":"([^"]+)"', html)
-        # Tenta múltiplos padrões para bl
-        bl_m = (
-            _re.search(r'"cfb2h":"([^"]+)"', html)
-            or _re.search(r'"boq_labs-tailwind-frontend_[\w.]+', html)
-        )
+
+        # Extrai bl (build label) — usa group(1) do padrão cfb2h (grupo capturado)
+        # NÃO usar group(0) que retorna a string JSON inteira "cfb2h":"boq_..."
+        bl_m1 = _re.search(r'"cfb2h":"([^"]+)"', html)
+        bl_m2 = _re.search(r'boq_labs-tailwind-frontend_[\w.]+', html)
 
         csrf_token  = csrf_m.group(1) if csrf_m else ""
         nlm_session = sid_m.group(1)  if sid_m  else ""
-        # remove aspas iniciais se veio do segundo padrão
-        current_bl  = (bl_m.group(0).lstrip('"') if bl_m else "")
+        if bl_m1:
+            current_bl = bl_m1.group(1)       # → "boq_labs-tailwind-frontend_20260405.03_p0"
+        elif bl_m2:
+            current_bl = bl_m2.group(0)       # → "boq_labs-tailwind-frontend_20260405.03_p0"
+        else:
+            current_bl = ""
+
+        # Sanity check: bl não deve conter aspas nem dois-pontos
+        if '"' in current_bl or ':' in current_bl:
+            logger.warning(f"[confirm-login] bl extraído parece inválido, ignorando: {current_bl!r}")
+            current_bl = ""
 
         logger.info(
             f"[confirm-login] status={html_status} url={final_url[:60]} "
-            f"CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl[:40] if current_bl else 'VAZIO'}"
+            f"CSRF={'OK' if csrf_token else 'VAZIO'} bl={current_bl or 'VAZIO'}"
         )
 
-        # Patch base.py fallback para garantia extra
-        if current_bl:
+        # Patch base.py fallback SOMENTE se bl parece válido (começa com boq_labs-)
+        if current_bl and current_bl.startswith("boq_labs-"):
             for py_path in [
                 "/usr/local/lib/python3.12/site-packages/notebooklm_tools/core/base.py",
                 "/usr/local/lib/python3.11/site-packages/notebooklm_tools/core/base.py",
@@ -423,7 +432,7 @@ async def confirm_login(body: dict):
                     )
                     if patched != orig:
                         base_py.write_text(patched, encoding="utf-8")
-                        logger.info(f"[confirm-login] base.py patchado: {py_path}")
+                        logger.info(f"[confirm-login] base.py patchado com bl={current_bl}: {py_path}")
 
         if csrf_token:
             _auth["csrf_ok"] = True
