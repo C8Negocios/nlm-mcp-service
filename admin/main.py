@@ -145,6 +145,7 @@ def _restart_mcp() -> bool:
             **os.environ,
             "NOTEBOOKLM_MCP_TRANSPORT": "http",
             "NOTEBOOKLM_MCP_PORT": "8080",
+            "NOTEBOOKLM_HL": "en",   # FIX: hl=pt herdado do container causa 400 na API Google
         }
         # Passar bl atual se disponível (evita usar o fallback stale)
         cached_bl = _auth.get("build_label") or os.environ.get("NOTEBOOKLM_BL", "")
@@ -472,6 +473,7 @@ async def confirm_login(body: dict):
             **os.environ,
             "NOTEBOOKLM_MCP_TRANSPORT": "http",
             "NOTEBOOKLM_MCP_PORT": "8080",
+            "NOTEBOOKLM_HL": "en",   # FIX: hl=pt herdado do container causa 400 na API Google
         }
         # Injetar bl e csrf extraídos do HTML do NotebookLM
         if current_bl:
