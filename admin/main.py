@@ -1233,6 +1233,147 @@ async def source_add(body: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GERAÇÃO DE ARTEFATOS POR LEAD (vídeo cinematic + deck de slides)
+# Disparado pelo webhook do bloco comercial após cada novo lead.
+# ══════════════════════════════════════════════════════════════════════════════
+
+SALES_CALLBACK_URL = os.getenv("SALES_CALLBACK_URL", "https://sales.codigooito.com.br/api/leads/{lead_id}/artifacts")
+SALES_CALLBACK_SECRET = os.getenv("SALES_CALLBACK_SECRET", "c8club-nlm-2026")
+
+async def _generate_artifacts_task(
+    notebook_id: str,
+    lead_id: str,
+    title: str,
+    content: str,
+):
+    """
+    Background task:
+    1. Adiciona source ao notebook
+    2. Cria vídeo cinematic via studio_create
+    3. Cria deck de slides via studio_create
+    4. Faz callback ao sales para salvar URLs
+    """
+    logger.info(f"[generate-artifacts] Iniciando para lead={lead_id} notebook={notebook_id}")
+
+    # 1. Adicionar source ao notebook
+    try:
+        result = await _mcp_tool("source_add", {
+            "notebook_id": notebook_id,
+            "source_type": "text",
+            "text": content,
+            "title": title,
+            "wait": True,
+        }, timeout=120)
+        if not result["ok"]:
+            await _mcp_tool("refresh_auth", {}, timeout=30)
+            _mcp_session["initialized"] = False
+            result = await _mcp_tool("source_add", {
+                "notebook_id": notebook_id,
+                "source_type": "text",
+                "text": content,
+                "title": title,
+                "wait": True,
+            }, timeout=120)
+        logger.info(f"[generate-artifacts] source_add ok={result['ok']} lead={lead_id}")
+    except Exception as e:
+        logger.error(f"[generate-artifacts] source_add falhou: {e}")
+
+    await asyncio.sleep(3)
+
+    video_url: str | None = None
+    slides_url: str | None = None
+
+    # 2. Criar vídeo cinematic
+    try:
+        vid = await _mcp_tool("studio_create", {
+            "notebook_id": notebook_id,
+            "artifact_type": "video",
+            "video_format": "cinematic",
+            "focus_prompt": f"Análise diagnóstica do lead: {title}",
+            "confirm": True,
+        }, timeout=600)
+        logger.info(f"[generate-artifacts] studio_create video ok={vid['ok']} lead={lead_id}")
+        if vid["ok"] and isinstance(vid.get("data"), dict):
+            video_url = (
+                vid["data"].get("url")
+                or vid["data"].get("video_url")
+                or vid["data"].get("artifact_url")
+            )
+    except Exception as e:
+        logger.error(f"[generate-artifacts] video falhou: {e}")
+
+    await asyncio.sleep(5)
+
+    # 3. Criar deck de slides
+    try:
+        sld = await _mcp_tool("studio_create", {
+            "notebook_id": notebook_id,
+            "artifact_type": "slide_deck",
+            "slide_format": "detailed_deck",
+            "focus_prompt": f"Deck comercial para o lead: {title}",
+            "confirm": True,
+        }, timeout=600)
+        logger.info(f"[generate-artifacts] studio_create slides ok={sld['ok']} lead={lead_id}")
+        if sld["ok"] and isinstance(sld.get("data"), dict):
+            slides_url = (
+                sld["data"].get("url")
+                or sld["data"].get("slides_url")
+                or sld["data"].get("artifact_url")
+            )
+    except Exception as e:
+        logger.error(f"[generate-artifacts] slides falhou: {e}")
+
+    # 4. Callback ao sales API para salvar URLs
+    try:
+        callback_url = SALES_CALLBACK_URL.format(lead_id=lead_id)
+        async with httpx.AsyncClient(timeout=15) as cl:
+            resp = await cl.patch(callback_url, json={
+                "secret": SALES_CALLBACK_SECRET,
+                "videoUrl": video_url,
+                "slidesUrl": slides_url,
+                "nlmStatus": "generated" if (video_url or slides_url) else "failed",
+            })
+        logger.info(f"[generate-artifacts] callback status={resp.status_code} lead={lead_id}")
+        if resp.status_code not in (200, 204):
+            logger.error(f"[generate-artifacts] callback falhou: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"[generate-artifacts] callback falhou: {e}")
+
+
+@app.post("/api/generate-artifacts")
+async def generate_artifacts(body: dict):
+    """
+    Dispara geração assíncrona de vídeo + slides para um lead.
+
+    Payload:
+    {
+      "notebook_id": "<UUID>",
+      "lead_id": "<UUID do lead no bloco comercial>",
+      "title": "Nome Lead — Empresa",
+      "content": "<rawAnswers do Typeform>"
+    }
+
+    Retorna imediatamente (202 Accepted).
+    Quando os artefatos ficam prontos, faz PATCH /api/leads/:lead_id/artifacts no sales.
+    """
+    notebook_id = body.get("notebook_id", "").strip()
+    lead_id = body.get("lead_id", "").strip()
+    title = body.get("title", "Lead Sem Título").strip()
+    content = body.get("content", "").strip()
+
+    if not notebook_id or not lead_id:
+        raise HTTPException(status_code=400, detail="notebook_id e lead_id são obrigatórios")
+    if not content:
+        raise HTTPException(status_code=400, detail="content é obrigatório")
+
+    # Dispara background sem bloquear o webhook do typeform
+    asyncio.create_task(_generate_artifacts_task(notebook_id, lead_id, title, content))
+
+    logger.info(f"[generate-artifacts] Tarefa enfileirada lead={lead_id}")
+    return {"ok": True, "queued": True, "lead_id": lead_id}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TYPEFORM → NOTEBOOKLM RAIOX SYNC
 # Sincroniza todas as respostas dos 16 funis "RAIO-X CULTURAL" automaticamente
 # ══════════════════════════════════════════════════════════════════════════════
