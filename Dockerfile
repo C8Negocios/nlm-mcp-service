@@ -34,7 +34,8 @@ RUN mkdir -p /usr/share/novnc \
     && curl -fsSL https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \
     | tar -xz --strip-components=1 -C /usr/share/novnc
 
-# Install Python packages (websockify via pip — avoids apt package web-dir bug)
+# Fix: notebooklm-mcp crashava com ImportError no fakeredis.aioredis.FakeConnection
+# Causa: docket-py exige fakeredis>=2.26 com suporte a FakeConnection
 RUN uv pip install --system \
     notebooklm-mcp-cli \
     "fastapi>=0.110" \
@@ -43,7 +44,10 @@ RUN uv pip install --system \
     websockets \
     websockify \
     websocket-client \
-    "httpx>=0.27"
+    "httpx>=0.27" \
+    "fakeredis[lua]>=2.26" \
+    "docket-py>=0.8"
+
 
 # Copy admin application (includes noVNC static files)
 COPY admin/ ./admin/
