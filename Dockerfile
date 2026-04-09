@@ -35,7 +35,7 @@ RUN mkdir -p /usr/share/novnc \
     | tar -xz --strip-components=1 -C /usr/share/novnc
 
 # Fix: notebooklm-mcp crashava com ImportError no fakeredis.aioredis.FakeConnection
-# Causa: docket-py exige fakeredis>=2.26 com suporte a FakeConnection
+# Causa: versao antiga do fakeredis nao tinha FakeConnection (adicionado em 2.26)
 RUN uv pip install --system \
     notebooklm-mcp-cli \
     "fastapi>=0.110" \
@@ -45,8 +45,7 @@ RUN uv pip install --system \
     websockify \
     websocket-client \
     "httpx>=0.27" \
-    "fakeredis[lua]>=2.26" \
-    "docket-py>=0.8"
+    "fakeredis[lua]>=2.26"
 
 
 # Copy admin application (includes noVNC static files)
