@@ -386,8 +386,9 @@ async def _direct_studio_create(
         logger.warning(f"[studio_create] nao conseguiu buscar source_ids: {e}")
 
     # Formatos de source_ids exigidos pela API
-    sources_nested = [[[sid]] for sid in source_ids]  # [[[id1]], [[id2]]]
-    sources_simple = [[sid] for sid in source_ids]    # [[id1], [id2]]
+    # Se source_ids vazio → passa None para NLM usar todas as fontes do notebook
+    sources_nested = [[[sid]] for sid in source_ids] if source_ids else None
+    sources_simple = [[sid] for sid in source_ids] if source_ids else None
 
     # 2. Construir params conforme studio.py
     if artifact_type == "video":
