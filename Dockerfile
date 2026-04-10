@@ -48,6 +48,10 @@ RUN uv pip install --system \
     websocket-client \
     "httpx>=0.27"
 
+# CRITICO: fakeredis>=2.33 removeu FakeConnection de fakeredis.aioredis
+# pydocket 0.18.2 (dependencia do fastmcp) ainda importa FakeConnection
+# Fixar na última versao compativel sobrescrevendo o que o pydocket instalou
+RUN uv pip install --system "fakeredis[lua]==2.32.1"
 
 
 # Copy admin application (includes noVNC static files)
