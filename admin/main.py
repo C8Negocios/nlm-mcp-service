@@ -329,11 +329,140 @@ async def _direct_add_text_source(
         if source_id:
             return {"ok": True, "source_id": source_id, "title": source_title}
         else:
-            return {"ok": False, "error": "Source ID não encontrado na resposta", "raw": resp.text[:300]}
+            return {"ok": False, "error": "Source ID nao encontrado na resposta", "raw": resp.text[:300]}
 
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
+async def _direct_studio_create(
+    notebook_id: str,
+    artifact_type: str,  # "video" | "slide_deck"
+    focus_prompt: str = "",
+) -> dict:
+    """
+    Cria um artefato no Studio do NotebookLM via batchexecute DIRETO.
+    Bypassa MCP (que não envia SAPISIDHASH).
+
+    Estrutura extraída do notebooklm-mcp-cli/core/studio.py + base.py:
+      RPC_CREATE_STUDIO = "R7cb6c"
+      STUDIO_TYPE_VIDEO     = 3  VIDEO_FORMAT_CINEMATIC = 3
+      STUDIO_TYPE_SLIDE_DECK = 8  SLIDE_DECK_FORMAT_DETAILED = 1
+    """
+    import urllib.parse as _urlparse
+
+    RPC_CREATE_STUDIO = "R7cb6c"
+    STUDIO_TYPE_VIDEO      = 3
+    STUDIO_TYPE_SLIDE_DECK = 8
+    VIDEO_FORMAT_CINEMATIC = 3
+    SLIDE_DECK_FORMAT_DETAILED = 1
+    SLIDE_DECK_LENGTH_DEFAULT  = 3
+
+    origin = "https://notebooklm.google.com"
+    bl = _auth.get("build_label") or os.environ.get("NOTEBOOKLM_BL", "boq_labs-tailwind-frontend_20260408.12_p0")
+
+    try:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+        meta = json.loads((profile_dir / "metadata.json").read_text())
+        csrf_token = meta.get("csrf_token", "")
+        cookie_dict, sapisid = _load_nlm_cookies()
+    except Exception as e:
+        return {"ok": False, "error": f"Credenciais nao carregadas: {e}"}
+
+    if not sapisid:
+        return {"ok": False, "error": "SAPISID ausente"}
+
+    # 1. Buscar source_ids do notebook (necessário para o payload)
+    source_ids: list[str] = []
+    try:
+        from notebooklm_tools.core.notebooks import NotebookManager  # type: ignore
+        from notebooklm_tools.utils.config import get_profile_dir    # type: ignore
+        profile = get_profile_dir("default")
+        nm = NotebookManager(profile_dir=profile)
+        nb = nm.get_notebook(notebook_id)
+        if nb and nb.get("sources"):
+            source_ids = [s["id"] for s in nb["sources"] if s.get("id")]
+    except Exception as e:
+        logger.warning(f"[studio_create] nao conseguiu buscar source_ids: {e}")
+
+    # Formatos de source_ids exigidos pela API
+    sources_nested = [[[sid]] for sid in source_ids]  # [[[id1]], [[id2]]]
+    sources_simple = [[sid] for sid in source_ids]    # [[id1], [id2]]
+
+    # 2. Construir params conforme studio.py
+    if artifact_type == "video":
+        studio_type = STUDIO_TYPE_VIDEO
+        inner_options = [
+            sources_simple,
+            "en",
+            focus_prompt or "",
+            None,
+            VIDEO_FORMAT_CINEMATIC,  # format_code=3 cinematic → sem visual_style_code
+        ]
+        video_options = [None, None, inner_options]
+        content = [
+            None, None,
+            studio_type,
+            sources_nested,
+            None, None, None, None,
+            video_options,
+        ]
+    elif artifact_type == "slide_deck":
+        studio_type = STUDIO_TYPE_SLIDE_DECK
+        slide_deck_options = [[focus_prompt or None, "en", SLIDE_DECK_FORMAT_DETAILED, SLIDE_DECK_LENGTH_DEFAULT]]
+        content = [
+            None, None,
+            studio_type,
+            sources_nested,
+            None, None, None, None, None, None, None, None, None, None, None, None,  # 12 nulls pos 4-15
+            slide_deck_options,  # pos 16
+        ]
+    else:
+        return {"ok": False, "error": f"artifact_type invalido: {artifact_type}"}
+
+    params = [[2], notebook_id, content]
+
+    # 3. Serializar f.req (mesmo formato do _build_request_body)
+    params_json = json.dumps(params, separators=(",", ":"), ensure_ascii=False)
+    f_req_inner = [[[RPC_CREATE_STUDIO, params_json, None, "generic"]]]
+    f_req_json = json.dumps(f_req_inner, separators=(",", ":"), ensure_ascii=False)
+    body_parts = [f"f.req={_urlparse.quote(f_req_json, safe='')}"]
+    if csrf_token:
+        body_parts.append(f"at={_urlparse.quote(csrf_token, safe='')}")
+    body = "&".join(body_parts) + "&"
+
+    # 4. URL
+    qp = _urlparse.urlencode({
+        "rpcids": RPC_CREATE_STUDIO,
+        "source-path": f"/notebook/{notebook_id}",
+        "bl": bl,
+        "hl": "en",
+        "rt": "c",
+    })
+    url = f"{origin}/_/LabsTailwindUi/data/batchexecute?{qp}"
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "Authorization": _make_sapisidhash(sapisid, origin),
+        "X-Same-Domain": "1",
+        "X-Goog-AuthUser": "0",
+        "Origin": origin,
+        "Referer": f"{origin}/notebook/{notebook_id}",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cl:
+            resp = await cl.post(url, content=body, cookies=cookie_dict, headers=headers)
+
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
+
+        # Resposta confirma que geração foi iniciada (processo assíncrono no NLM)
+        return {"ok": True, "artifact_type": artifact_type, "status": "generating"}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/status")
@@ -1255,75 +1384,53 @@ async def _generate_artifacts_task(
     """
     logger.info(f"[generate-artifacts] Iniciando para lead={lead_id} notebook={notebook_id}")
 
-    # 1. Adicionar source ao notebook
+    # 1. Adicionar source ao notebook — DIRETO (bypassa MCP que nao envia SAPISIDHASH)
     try:
-        result = await _mcp_tool("source_add", {
-            "notebook_id": notebook_id,
-            "source_type": "text",
-            "text": content,
-            "title": title,
-            "wait": True,
-        }, timeout=120)
+        result = await _direct_add_text_source(notebook_id, content, title)
+        logger.info(f"[generate-artifacts] source_add ok={result['ok']} lead={lead_id} sid={result.get('source_id')}")
         if not result["ok"]:
-            await _mcp_tool("refresh_auth", {}, timeout=30)
-            _mcp_session["initialized"] = False
-            result = await _mcp_tool("source_add", {
-                "notebook_id": notebook_id,
-                "source_type": "text",
-                "text": content,
-                "title": title,
-                "wait": True,
-            }, timeout=120)
-        logger.info(f"[generate-artifacts] source_add ok={result['ok']} lead={lead_id}")
+            logger.warning(f"[generate-artifacts] source_add falhou: {result.get('error')} — continuando sem source")
     except Exception as e:
-        logger.error(f"[generate-artifacts] source_add falhou: {e}")
+        logger.error(f"[generate-artifacts] source_add excecao: {e}")
 
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)  # Aguarda indexacao do source
 
     video_url: str | None = None
     slides_url: str | None = None
 
-    # 2. Criar vídeo cinematic
+    # 2. Criar vídeo cinematic — DIRETO
     try:
-        vid = await _mcp_tool("studio_create", {
-            "notebook_id": notebook_id,
-            "artifact_type": "video",
-            "video_format": "cinematic",
-            "focus_prompt": f"Análise diagnóstica do lead: {title}",
-            "confirm": True,
-        }, timeout=600)
+        vid = await _direct_studio_create(
+            notebook_id=notebook_id,
+            artifact_type="video",
+            focus_prompt=f"Analise diagnostica do lead: {title}",
+            video_format="cinematic",
+        )
         logger.info(f"[generate-artifacts] studio_create video ok={vid['ok']} lead={lead_id}")
-        if vid["ok"] and isinstance(vid.get("data"), dict):
-            video_url = (
-                vid["data"].get("url")
-                or vid["data"].get("video_url")
-                or vid["data"].get("artifact_url")
-            )
+        if vid["ok"]:
+            # Geração é assíncrona no NLM — URL fica disponível via studio_status polling
+            # Por ora marcamos como 'generating' e o frontend faz polling
+            video_url = f"https://notebooklm.google.com/notebook/{notebook_id}"  # link direto ao notebook
     except Exception as e:
-        logger.error(f"[generate-artifacts] video falhou: {e}")
+        logger.error(f"[generate-artifacts] video excecao: {e}")
 
-    await asyncio.sleep(5)
+    await asyncio.sleep(3)
 
-    # 3. Criar deck de slides
+    # 3. Criar deck de slides — DIRETO
     try:
-        sld = await _mcp_tool("studio_create", {
-            "notebook_id": notebook_id,
-            "artifact_type": "slide_deck",
-            "slide_format": "detailed_deck",
-            "focus_prompt": f"Deck comercial para o lead: {title}",
-            "confirm": True,
-        }, timeout=600)
+        sld = await _direct_studio_create(
+            notebook_id=notebook_id,
+            artifact_type="slide_deck",
+            focus_prompt=f"Deck comercial para o lead: {title}",
+            slide_format="detailed_deck",
+        )
         logger.info(f"[generate-artifacts] studio_create slides ok={sld['ok']} lead={lead_id}")
-        if sld["ok"] and isinstance(sld.get("data"), dict):
-            slides_url = (
-                sld["data"].get("url")
-                or sld["data"].get("slides_url")
-                or sld["data"].get("artifact_url")
-            )
+        if sld["ok"]:
+            slides_url = f"https://notebooklm.google.com/notebook/{notebook_id}"  # mesmo notebook
     except Exception as e:
-        logger.error(f"[generate-artifacts] slides falhou: {e}")
+        logger.error(f"[generate-artifacts] slides excecao: {e}")
 
-    # 4. Callback ao sales API para salvar URLs
+    # 4. Callback ao sales API para salvar URLs e status
     try:
         callback_url = SALES_CALLBACK_URL.format(lead_id=lead_id)
         async with httpx.AsyncClient(timeout=15) as cl:
@@ -1337,7 +1444,7 @@ async def _generate_artifacts_task(
         if resp.status_code not in (200, 204):
             logger.error(f"[generate-artifacts] callback falhou: {resp.text[:200]}")
     except Exception as e:
-        logger.error(f"[generate-artifacts] callback falhou: {e}")
+        logger.error(f"[generate-artifacts] callback excecao: {e}")
 
 
 @app.post("/api/generate-artifacts")
