@@ -48,9 +48,6 @@ RUN uv pip install --system \
     websocket-client \
     "httpx>=0.27"
 
-# Segundo passo: forcar fakeredis mais recente (compativel com docket) sobre o que veio com fastmcp
-RUN uv pip install --system --upgrade "fakeredis[lua]" "docket>=0.8"
-
 
 
 # Copy admin application (includes noVNC static files)
