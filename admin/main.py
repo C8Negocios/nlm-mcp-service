@@ -466,6 +466,185 @@ async def _direct_studio_create(
         return {"ok": False, "error": str(e)}
 
 
+
+# ── Diretório para artefatos baixados ─────────────────────────────────────────
+ARTIFACTS_DIR = Path("/tmp/nlm-artifacts")
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+from fastapi.responses import FileResponse as _FileResponse
+
+@app.get("/artifacts/{filename}")
+async def serve_artifact(filename: str):
+    """Serve artefatos gerados (MP4, PDF) via HTTPS público."""
+    path = ARTIFACTS_DIR / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artefato não encontrado")
+    return _FileResponse(path)
+
+
+async def _direct_poll_studio_status(
+    notebook_id: str,
+    artifact_type: str,      # "video" | "slide_deck"
+    max_wait: int = 600,
+    poll_interval: int = 20,
+) -> dict:
+    """
+    Polling via batchexecute (RPC gArtLc) até o artefato ficar pronto.
+    status_code 1=in_progress  3=completed
+    Video URL:      artifact_data[8][3]
+    Slide deck URL: artifact_data[16][0]
+    """
+    import urllib.parse as _urlparse
+
+    RPC_POLL_STUDIO    = "gArtLc"
+    STUDIO_TYPE_VIDEO      = 3
+    STUDIO_TYPE_SLIDE_DECK = 8
+
+    origin = "https://notebooklm.google.com"
+    bl = _auth.get("build_label") or os.environ.get("NOTEBOOKLM_BL", "boq_labs-tailwind-frontend_20260408.12_p0")
+
+    try:
+        profile_dir = COOKIES_DIR / "profiles" / "default"
+        meta = json.loads((profile_dir / "metadata.json").read_text())
+        csrf_token = meta.get("csrf_token", "")
+        cookie_dict, sapisid = _load_nlm_cookies()
+    except Exception as e:
+        return {"ok": False, "error": f"Credenciais: {e}"}
+
+    if not sapisid:
+        return {"ok": False, "error": "SAPISID ausente"}
+
+    target_type = STUDIO_TYPE_VIDEO if artifact_type == "video" else STUDIO_TYPE_SLIDE_DECK
+    params = [[2], notebook_id, 'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"']
+
+    elapsed = 0
+    while elapsed < max_wait:
+        try:
+            params_json = json.dumps(params, separators=(",", ":"), ensure_ascii=False)
+            f_req_inner = [[[RPC_POLL_STUDIO, params_json, None, "generic"]]]
+            f_req_json  = json.dumps(f_req_inner, separators=(",", ":"), ensure_ascii=False)
+            body_parts  = [f"f.req={_urlparse.quote(f_req_json, safe='')}"]
+            if csrf_token:
+                body_parts.append(f"at={_urlparse.quote(csrf_token, safe='')}")
+            body = "&".join(body_parts) + "&"
+
+            qp  = _urlparse.urlencode({"rpcids": RPC_POLL_STUDIO, "source-path": f"/notebook/{notebook_id}", "bl": bl, "hl": "en", "rt": "c"})
+            rpc_url = f"{origin}/_/LabsTailwindUi/data/batchexecute?{qp}"
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Authorization": _make_sapisidhash(sapisid, origin),
+                "X-Same-Domain": "1", "X-Goog-AuthUser": "0",
+                "Origin": origin, "Referer": f"{origin}/notebook/{notebook_id}",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            }
+
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cl:
+                resp = await cl.post(rpc_url, content=body, cookies=cookie_dict, headers=headers)
+
+            if resp.status_code == 200:
+                text_body = resp.text
+                if text_body.startswith(")]}{"):
+                    text_body = text_body[4:]
+                lines_resp = text_body.strip().split("\n")
+                results = []
+                ridx = 0
+                while ridx < len(lines_resp):
+                    ln = lines_resp[ridx].strip()
+                    if not ln:
+                        ridx += 1; continue
+                    try:
+                        int(ln); ridx += 1
+                        if ridx < len(lines_resp):
+                            try: results.append(json.loads(lines_resp[ridx]))
+                            except Exception: pass
+                        ridx += 1
+                    except ValueError:
+                        try: results.append(json.loads(ln))
+                        except Exception: pass
+                        ridx += 1
+
+                for chunk in results:
+                    if not isinstance(chunk, list): continue
+                    for item in chunk:
+                        if not (isinstance(item, list) and len(item) >= 3
+                                and item[0] == "wrb.fr" and item[1] == RPC_POLL_STUDIO):
+                            continue
+                        result_str = item[2]
+                        if not isinstance(result_str, str): continue
+                        try:
+                            inner = json.loads(result_str)
+                            artifact_list = inner[0] if isinstance(inner[0], list) else inner
+                            for ad in artifact_list:
+                                if not isinstance(ad, list) or len(ad) < 5: continue
+                                artifact_id  = ad[0]
+                                type_code    = ad[2]
+                                status_code  = ad[4]
+                                if type_code != target_type: continue
+                                if status_code == 3:  # completed
+                                    url_found = None
+                                    if type_code == STUDIO_TYPE_VIDEO and len(ad) > 8:
+                                        opts = ad[8]
+                                        if isinstance(opts, list) and len(opts) > 3 and isinstance(opts[3], str):
+                                            url_found = opts[3]
+                                    elif type_code == STUDIO_TYPE_SLIDE_DECK and len(ad) > 16:
+                                        opts = ad[16]
+                                        if isinstance(opts, list):
+                                            url_found = (opts[0] if isinstance(opts[0], str)
+                                                         else opts[3] if len(opts) > 3 and isinstance(opts[3], str)
+                                                         else None)
+                                    logger.info(f"[poll_studio] {artifact_type} COMPLETO artifact_id={artifact_id}")
+                                    return {"ok": True, "artifact_id": artifact_id, "url": url_found}
+                                elif status_code == 1:
+                                    logger.info(f"[poll_studio] {artifact_type} em geracao... {elapsed}s")
+                        except Exception as pe:
+                            logger.warning(f"[poll_studio] parse: {pe}")
+            else:
+                logger.warning(f"[poll_studio] HTTP {resp.status_code}")
+
+        except Exception as e:
+            logger.warning(f"[poll_studio] erro: {e}")
+
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+
+    return {"ok": False, "error": f"Timeout {max_wait}s aguardando {artifact_type}"}
+
+
+async def _download_and_serve(artifact_type: str, lead_id: str, url: str) -> "str | None":
+    """
+    Baixa o artefato da URL do NLM (autenticado) e salva em /tmp/nlm-artifacts/.
+    Retorna a URL pública servida pelo NLM service.
+    """
+    ext = "mp4" if artifact_type == "video" else "pdf"
+    filename = f"{lead_id}_{artifact_type}.{ext}"
+    dest = ARTIFACTS_DIR / filename
+
+    try:
+        cookie_dict, sapisid = _load_nlm_cookies()
+        origin = "https://notebooklm.google.com"
+        dl_headers = {
+            "Authorization": _make_sapisidhash(sapisid, origin),
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        }
+        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as cl:
+            async with cl.stream("GET", url, cookies=cookie_dict, headers=dl_headers) as r:
+                if r.status_code != 200:
+                    logger.error(f"[download] HTTP {r.status_code} url={url[:80]}")
+                    return None
+                with open(dest, "wb") as fh:
+                    async for chunk in r.aiter_bytes(chunk_size=65536):
+                        fh.write(chunk)
+
+        size_kb = dest.stat().st_size // 1024
+        logger.info(f"[download] {filename} salvo ({size_kb} KB)")
+        public_base = os.environ.get("NLM_PUBLIC_URL", "https://nlm.codigooito.com.br")
+        return f"{public_base}/artifacts/{filename}"
+
+    except Exception as e:
+        logger.error(f"[download] {artifact_type}: {e}")
+        return None
+
+
 @app.get("/api/status")
 async def get_status():
     # Check if nlm profile exists (server-side Chrome login done)
@@ -1377,71 +1556,67 @@ async def _generate_artifacts_task(
     content: str,
 ):
     """
-    Background task:
-    1. Adiciona source ao notebook
-    2. Cria vídeo cinematic via studio_create
-    3. Cria deck de slides via studio_create
-    4. Faz callback ao sales para salvar URLs
+    Pipeline completo de geração de artefatos NLM:
+    1. Adiciona source (rawAnswers do lead) ao notebook
+    2. Dispara studio_create para video cinematic
+    3. Dispara studio_create para slide_deck
+    4. Aguarda AMBOS ficarem prontos via poll
+    5. Baixa os artefatos e os serve via /artifacts/
+    6. Callback ao sales com URLs reais
     """
-    logger.info(f"[generate-artifacts] Iniciando para lead={lead_id} notebook={notebook_id}")
+    logger.info(f"[generate-artifacts] Iniciando lead={lead_id} notebook={notebook_id}")
 
-    # 1. Adicionar source ao notebook — DIRETO (bypassa MCP que nao envia SAPISIDHASH)
-    try:
-        result = await _direct_add_text_source(notebook_id, content, title)
-        logger.info(f"[generate-artifacts] source_add ok={result['ok']} lead={lead_id} sid={result.get('source_id')}")
-        if not result["ok"]:
-            logger.warning(f"[generate-artifacts] source_add falhou: {result.get('error')} — continuando sem source")
-    except Exception as e:
-        logger.error(f"[generate-artifacts] source_add excecao: {e}")
+    # 1. Adicionar source ao notebook
+    source_result = await _direct_add_text_source(notebook_id, content, title)
+    logger.info(f"[generate-artifacts] source_add ok={source_result['ok']} sid={source_result.get('source_id')} lead={lead_id}")
+    if not source_result["ok"]:
+        logger.warning(f"[generate-artifacts] source_add falhou: {source_result.get('error')} — continuando")
 
-    await asyncio.sleep(5)  # Aguarda indexacao do source
+    # Aguardar indexação
+    await asyncio.sleep(10)
 
+    # 2. Disparar video cinematic
+    focus = f"Crie uma apresentação em vídeo cinematic para {title}."
+    vid_trigger = await _direct_studio_create(notebook_id, "video", focus_prompt=focus)
+    logger.info(f"[generate-artifacts] video trigger ok={vid_trigger['ok']} lead={lead_id}")
+
+    # 3. Disparar slide deck
+    sld_trigger = await _direct_studio_create(notebook_id, "slide_deck", focus_prompt=focus)
+    logger.info(f"[generate-artifacts] slides trigger ok={sld_trigger['ok']} lead={lead_id}")
+
+    # Pequena pausa antes de começar o polling
+    await asyncio.sleep(10)
+
+    # 4. Poll até video ficar pronto (max 8 min)
     video_url: str | None = None
+    vid_poll = await _direct_poll_studio_status(notebook_id, "video", max_wait=480, poll_interval=20)
+    logger.info(f"[generate-artifacts] video poll ok={vid_poll['ok']} lead={lead_id}")
+    if vid_poll["ok"] and vid_poll.get("url"):
+        # 5a. Baixar e servir video
+        video_url = await _download_and_serve("video", lead_id, vid_poll["url"])
+        logger.info(f"[generate-artifacts] video servido em {video_url} lead={lead_id}")
+
+    # Poll até slides ficarem prontos (max 8 min)
     slides_url: str | None = None
+    sld_poll = await _direct_poll_studio_status(notebook_id, "slide_deck", max_wait=480, poll_interval=20)
+    logger.info(f"[generate-artifacts] slides poll ok={sld_poll['ok']} lead={lead_id}")
+    if sld_poll["ok"] and sld_poll.get("url"):
+        # 5b. Baixar e servir slides
+        slides_url = await _download_and_serve("slide_deck", lead_id, sld_poll["url"])
+        logger.info(f"[generate-artifacts] slides servidos em {slides_url} lead={lead_id}")
 
-    # 2. Criar vídeo cinematic — DIRETO
-    try:
-        vid = await _direct_studio_create(
-            notebook_id=notebook_id,
-            artifact_type="video",
-            focus_prompt=f"Analise diagnostica do lead: {title}",
-            video_format="cinematic",
-        )
-        logger.info(f"[generate-artifacts] studio_create video ok={vid['ok']} lead={lead_id}")
-        if vid["ok"]:
-            # Geração é assíncrona no NLM — URL fica disponível via studio_status polling
-            # Por ora marcamos como 'generating' e o frontend faz polling
-            video_url = f"https://notebooklm.google.com/notebook/{notebook_id}"  # link direto ao notebook
-    except Exception as e:
-        logger.error(f"[generate-artifacts] video excecao: {e}")
-
-    await asyncio.sleep(3)
-
-    # 3. Criar deck de slides — DIRETO
-    try:
-        sld = await _direct_studio_create(
-            notebook_id=notebook_id,
-            artifact_type="slide_deck",
-            focus_prompt=f"Deck comercial para o lead: {title}",
-            slide_format="detailed_deck",
-        )
-        logger.info(f"[generate-artifacts] studio_create slides ok={sld['ok']} lead={lead_id}")
-        if sld["ok"]:
-            slides_url = f"https://notebooklm.google.com/notebook/{notebook_id}"  # mesmo notebook
-    except Exception as e:
-        logger.error(f"[generate-artifacts] slides excecao: {e}")
-
-    # 4. Callback ao sales API para salvar URLs e status
+    # 6. Callback ao sales com URLs reais
+    nlm_status = "generated" if (video_url or slides_url) else "failed"
     try:
         callback_url = SALES_CALLBACK_URL.format(lead_id=lead_id)
         async with httpx.AsyncClient(timeout=15) as cl:
             resp = await cl.patch(callback_url, json={
-                "secret": SALES_CALLBACK_SECRET,
-                "videoUrl": video_url,
+                "secret":    SALES_CALLBACK_SECRET,
+                "videoUrl":  video_url,
                 "slidesUrl": slides_url,
-                "nlmStatus": "generated" if (video_url or slides_url) else "failed",
+                "nlmStatus": nlm_status,
             })
-        logger.info(f"[generate-artifacts] callback status={resp.status_code} lead={lead_id}")
+        logger.info(f"[generate-artifacts] callback status={resp.status_code} nlmStatus={nlm_status} lead={lead_id}")
         if resp.status_code not in (200, 204):
             logger.error(f"[generate-artifacts] callback falhou: {resp.text[:200]}")
     except Exception as e:
