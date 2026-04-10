@@ -1497,8 +1497,9 @@ async def source_add(body: dict):
 
     if not notebook_id:
         raise HTTPException(status_code=400, detail="notebook_id é obrigatório")
+    # content pode ser simples (só nome/empresa) — NLM usa o notebook completo para gerar
     if not content:
-        raise HTTPException(status_code=400, detail="content é obrigatório")
+        content = title or "Lead"
 
     try:
         result = await _mcp_tool("source_add", {
