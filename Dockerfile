@@ -34,18 +34,23 @@ RUN mkdir -p /usr/share/novnc \
     && curl -fsSL https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \
     | tar -xz --strip-components=1 -C /usr/share/novnc
 
-# Fix: notebooklm-mcp crashava com ImportError no fakeredis.aioredis.FakeConnection
-# Causa: versao antiga do fakeredis nao tinha FakeConnection (adicionado em 2.26)
+# Fix: docket/_redis.py crashava em _memory_connection_pool
+# Causa: fastmcp puxa 'docket' que usa API nova do fakeredis nao presente nas versoes antigas
+# Solucao: instalar em dois passos — primeiro o notebooklm-mcp-cli (traz docket), depois
+#          forcar upgrade do fakeredis para a versao mais recente com suporte total a aioredis
 RUN uv pip install --system \
-    notebooklm-mcp-cli \
+    "notebooklm-mcp-cli==0.5.19" \
     "fastapi>=0.110" \
     "uvicorn[standard]>=0.29" \
     python-multipart \
     websockets \
     websockify \
     websocket-client \
-    "httpx>=0.27" \
-    "fakeredis[lua]>=2.26"
+    "httpx>=0.27"
+
+# Segundo passo: forcar fakeredis mais recente (compativel com docket) sobre o que veio com fastmcp
+RUN uv pip install --system --upgrade "fakeredis[lua]" "docket>=0.8"
+
 
 
 # Copy admin application (includes noVNC static files)
