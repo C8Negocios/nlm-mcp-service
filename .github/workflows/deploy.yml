@@ -37,14 +37,21 @@ jobs:
             ghcr.io/c8negocios/nlm-mcp-service:latest
             ghcr.io/c8negocios/nlm-mcp-service:${{ github.sha }}
 
-      - name: Trigger Coolify service restart
+      - name: Trigger Coolify redeploy (pull latest image + restart)
         run: |
-          echo "Restarting Coolify service: ${{ secrets.COOLIFY_SERVICE_UUID }}"
-          curl -s -X POST \
-            "http://157.180.122.109:8000/api/v1/services/${{ secrets.COOLIFY_SERVICE_UUID }}/start" \
+          echo "🚀 Triggering Coolify redeploy for service: ${{ secrets.COOLIFY_SERVICE_UUID }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "http://157.180.122.109:8000/api/v1/services/${{ secrets.COOLIFY_SERVICE_UUID }}/restart" \
             -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            || echo "Coolify restart triggered (may need manual restart first time)"
+            -H "Content-Type: application/json")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "HTTP $HTTP_CODE — $BODY"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "⚠️ Coolify restart returned $HTTP_CODE — check manually"
+          else
+            echo "✅ Coolify redeploy queued successfully"
+          fi
 
       - name: Deploy status
-        run: echo "✅ Image pushed to ghcr.io/c8negocios/nlm-mcp-service:latest"
+        run: echo "✅ Build done — ghcr.io/c8negocios/nlm-mcp-service:latest pushed + Coolify restart triggered"
